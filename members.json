@@ -1,0 +1,73 @@
+{
+  "admin": {
+    "password": "$2b$10$rn2bOSWLzFrGXEZV66lAg.j2mgsQVBdg1x/m.2di0wfbCkS3TPole",
+    "role": "hassan",
+    "flag": "👑",
+    "statusQuote": "مدير عام شات حسان برو 🦅",
+    "avatarUrl": "",
+    "likes": 10000,
+    "points": 2000000,
+    "honorBadge": "👑 المدير التنفيذي",
+    "ipAddress": "176.123.17.246",
+    "deviceInfo": "هاتف أندرويد (Android)",
+    "deviceFingerprint": "Android|8||btt37i|1e47r47|lrbp2b|1mh1c9f|1ied92x|1z0n5po|35f743d3.Chrome",
+    "lastSeen": 1794238913529,
+    "nameColor": "#d97706",
+    "textColor": "#0f172a",
+    "nameGradient": "from-amber-400 to-yellow-200",
+    "theme": "pearl-gray-calm",
+    "fontFamily": "Cairo",
+    "wallpaper": "default",
+    "bubbleStyle": "modern",
+    "fontSize": "base",
+    "engagement": {
+      "activeTimeMinutes": 26,
+      "messagesSent": 0,
+      "wallPostsCount": 0,
+      "micTimeMinutes": 0,
+      "starsLevel": 0.4,
+      "progressPercent": 43
+    },
+    "ipHistory": [
+      "185.80.142.139",
+      "176.123.17.246"
+    ],
+    "deviceHistory": [
+      "هاتف أندرويد (Android)"
+    ],
+    "fingerprintHistory": [
+      "Android|8||btt37i|1e47r47|lrbp2b|1mh1c9f|1l301n7|1z0n5po|255ea601.Chrome",
+      "Android|8||btt37i|1e47r47|lrbp2b|1mh1c9f|1ied92x|1z0n5po|35f743d3.Chrome"
+    ],
+    "isIncognito": false
+  },
+  "زائر اختبار": {
+    "password": "$2b$10$YbQgAnOHK6PTBsTL9EnWle3RhCY2mZhq2dD9Rx857YlEEAyLW8ojK",
+    "role": "guest",
+    "flag": "🇾🇪",
+    "statusQuote": "زائر",
+    "likes": 100,
+    "points": 500,
+    "ipAddress": "77.113.69.223",
+    "deviceInfo": "جهاز لينكس (Linux)",
+    "lastSeen": 1792367433333,
+    "isJailed": false,
+    "deviceFingerprint": "FP-70B6-D59D-M6K6",
+    "nameColor": "#d97706",
+    "textColor": "#0f172a",
+    "nameGradient": "from-amber-400 to-yellow-200",
+    "theme": "pearl-gray-calm",
+    "fontFamily": "Cairo",
+    "wallpaper": "default",
+    "bubbleStyle": "modern",
+    "fontSize": "base",
+    "engagement": {
+      "activeTimeMinutes": 61,
+      "messagesSent": 0,
+      "wallPostsCount": 0,
+      "micTimeMinutes": 0,
+      "starsLevel": 1,
+      "progressPercent": 1
+    }
+  }
+}

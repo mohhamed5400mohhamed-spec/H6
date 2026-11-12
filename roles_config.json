@@ -1,0 +1,37 @@
+[
+  {
+    "id": "hassan",
+    "name": "🦅 إدارة عليا (hassan)",
+    "level": 100000,
+    "badgeColor": "bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-600 text-black font-black shadow-lg",
+    "isSystem": true
+  },
+  {
+    "id": "admin",
+    "name": "👑 مدير النظام (Admin)",
+    "level": 100,
+    "badgeColor": "bg-red-600 text-white",
+    "isSystem": true
+  },
+  {
+    "id": "super",
+    "name": "🛡️ سوبر إداري (Super)",
+    "level": 75,
+    "badgeColor": "bg-amber-600 text-white",
+    "isSystem": true
+  },
+  {
+    "id": "member",
+    "name": "🎖️ عضو معتمد (Member)",
+    "level": 50,
+    "badgeColor": "bg-indigo-600 text-white",
+    "isSystem": true
+  },
+  {
+    "id": "guest",
+    "name": "👤 زائر (Guest)",
+    "level": 10,
+    "badgeColor": "bg-slate-600 text-white",
+    "isSystem": true
+  }
+]
