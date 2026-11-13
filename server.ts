@@ -70,8 +70,8 @@ const io = new SocketIOServer(httpServer, {
     credentials: true
   },
   maxHttpBufferSize: 50 * 1024 * 1024, // 50MB buffer
-  pingTimeout: 60000, // 60s keep-alive timeout tolerance
-  pingInterval: 8000, // 8s fast heartbeat to prevent mobile carrier NAT / Render proxy drops
+  pingTimeout: 120000, // 120s high-tolerance timeout for mobile OS background sleep
+  pingInterval: 10000, // 10s heartbeat to prevent mobile carrier NAT / reverse proxy drops
   connectTimeout: 45000,
   upgradeTimeout: 30000,
   allowUpgrades: true,
@@ -4857,17 +4857,22 @@ io.on('connection', (socket) => {
 
   // Keep-Alive Heartbeat Responder (يضمن بقاء الاتصال حياً وحساب سرعة الاستجابة Ping)
   socket.on('keepAlivePing', (data?: { timestamp?: number }) => {
+    const now = Date.now();
     for (const s of activeSessions.values()) {
       if (s.currentSocketId === socket.id) {
-        s.lastActiveTime = Date.now();
+        s.lastActiveTime = now;
         break;
       }
     }
-    socket.emit('keepAlivePong', { timestamp: Date.now(), clientTimestamp: data?.timestamp });
+    const activeU = users.find((u) => u.id === socket.id);
+    if (activeU) {
+      activeU.lastActiveTime = now;
+    }
+    socket.emit('keepAlivePong', { timestamp: now, clientTimestamp: data?.timestamp });
   });
 
   // Restore Session without disconnect (استعادة الجلسة الفورية عند فتح قفل الشاشة أو عودة النت دون اعتباره دخول جديد)
-  socket.on('restoreSession', ({ sessionToken, username, room, deviceFingerprint, isIncognito }: { sessionToken?: string; username?: string; room?: string; deviceFingerprint?: string; isIncognito?: boolean }) => {
+  socket.on('restoreSession', ({ sessionToken, username, room, deviceFingerprint, isIncognito, presenceState }: { sessionToken?: string; username?: string; room?: string; deviceFingerprint?: string; isIncognito?: boolean; presenceState?: 'online' | 'away' }) => {
     cleanExpiredBans();
 
     let session = sessionToken ? activeSessions.get(sessionToken) : undefined;
@@ -5028,7 +5033,7 @@ io.on('connection', (socket) => {
       session.currentSocketId = socket.id;
       session.lastActiveTime = Date.now();
       session.user.id = socket.id;
-      session.user.presenceState = 'online';
+      session.user.presenceState = presenceState === 'away' ? 'away' : 'online';
       session.user.room = targetRoom;
       if (isUserJailed) {
         session.user.isJailed = true;
@@ -5063,7 +5068,8 @@ io.on('connection', (socket) => {
           if (!foundExisting) {
             users[i].id = socket.id;
             users[i].room = targetRoom;
-            users[i].presenceState = 'online';
+            users[i].presenceState = presenceState === 'away' ? 'away' : 'online';
+            users[i].lastActiveTime = Date.now();
             users[i].ipAddress = currentClientIp;
             users[i].deviceInfo = clientDevice;
             if (incomingFp) users[i].deviceFingerprint = incomingFp;

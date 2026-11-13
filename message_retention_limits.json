@@ -1,0 +1,5 @@
+{
+  "roomMaxMessages": 200,
+  "wallMaxPosts": 100,
+  "privateMaxMessages": 100
+}

@@ -1,6 +1,7 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useId } from 'react';
 import { Mic, Square, Trash2, Send, Play, Pause } from 'lucide-react';
 import { uploadMediaWithProgress } from '../utils/connectionKeepAlive';
+import { mediaSessionManager } from '../utils/mediaSessionManager';
 
 export interface VoiceNoteData {
   audioUrl: string;
@@ -345,19 +346,30 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({ onSendVoice, onCan
   );
 };
 
-// 2. Custom Sleek Voice Note Player inside Chat Bubbles (يعمل في العام والخاص مع عداد الثواني)
+// 2. Custom Sleek Voice Note Player inside Chat Bubbles (يعمل في العام والخاص مع عداد الثواني + ربط شريط إشعارات الهاتف)
 interface VoicePlayerProps {
   audioUrl: string;
   duration?: number;
   isMe?: boolean;
+  senderName?: string;
 }
 
-export const VoicePlayer: React.FC<VoicePlayerProps> = ({ audioUrl, duration = 3, isMe = false }) => {
+export const VoicePlayer: React.FC<VoicePlayerProps> = ({ audioUrl, duration = 3, isMe = false, senderName }) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [actualDuration, setActualDuration] = useState<number>(duration || 3);
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const isManualPauseRef = useRef<boolean>(false);
+  const reactId = useId();
+  const mediaId = `voice-note-${reactId}`;
+
+  const formatSecs = (s: number) => {
+    const total = Math.max(0, Math.floor(s));
+    const m = Math.floor(total / 60);
+    const sec = total % 60;
+    return `${m < 10 ? '0' : ''}${m}:${sec < 10 ? '0' : ''}${sec}`;
+  };
 
   useEffect(() => {
     setActualDuration(duration && duration > 0 ? duration : 3);
@@ -367,38 +379,133 @@ export const VoicePlayer: React.FC<VoicePlayerProps> = ({ audioUrl, duration = 3
     if (!audioUrl) return;
 
     const a = new Audio(audioUrl);
+    (a as any).playsInline = true;
+    a.setAttribute('playsinline', 'true');
+    a.setAttribute('webkit-playsinline', 'true');
+    a.preload = 'metadata';
     audioRef.current = a;
 
     a.onloadedmetadata = () => {
       if (a.duration && isFinite(a.duration) && a.duration > 0) {
-        setActualDuration(Math.round(a.duration));
+        const rounded = Math.round(a.duration);
+        setActualDuration(rounded);
+        mediaSessionManager.updateMediaState(mediaId, { duration: a.duration });
       }
     };
 
     a.ontimeupdate = () => {
       setCurrentTime(a.currentTime);
+      mediaSessionManager.updateMediaState(mediaId, {
+        currentTime: a.currentTime,
+        duration: a.duration && isFinite(a.duration) && a.duration > 0 ? a.duration : actualDuration,
+        playbackRate: a.playbackRate || 1
+      });
+    };
+
+    a.onpause = () => {
+      setIsPlaying(false);
+      if (!isManualPauseRef.current && !a.ended) {
+        mediaSessionManager.notifyUnexpectedElementPause(mediaId);
+      }
+      isManualPauseRef.current = false;
+    };
+
+    a.onplay = () => {
+      isManualPauseRef.current = false;
+      setIsPlaying(true);
+      mediaSessionManager.updateMediaState(mediaId, { isPlaying: true });
     };
 
     a.onended = () => {
+      isManualPauseRef.current = true;
       setIsPlaying(false);
       setCurrentTime(0);
+      mediaSessionManager.deactivateMedia(mediaId);
     };
 
     return () => {
+      isManualPauseRef.current = true;
+      mediaSessionManager.deactivateMedia(mediaId);
       a.pause();
       a.src = '';
     };
   }, [audioUrl]);
 
+  const registerAndPlay = () => {
+    const a = audioRef.current;
+    if (!a) return;
+
+    const effectiveDur =
+      a.duration && isFinite(a.duration) && a.duration > 0 ? a.duration : Math.max(1, actualDuration);
+    const clipTitle = senderName
+      ? `🎙️ ملاحظة صوتية من ${senderName}`
+      : '🎙️ ملاحظة صوتية في الدردشة';
+
+    mediaSessionManager.activateMedia({
+      id: mediaId,
+      kind: 'voice-note',
+      title: clipTitle,
+      artist: `المدة ${formatSecs(effectiveDur)} • شات حسان برو`,
+      album: 'الملاحظات الصوتية',
+      artworkUrl: '/favicon.svg',
+      duration: effectiveDur,
+      currentTime: a.currentTime || 0,
+      playbackRate: playbackSpeed,
+      isPlaying: true,
+      onPlay: () => {
+        if (!audioRef.current) return;
+        audioRef.current.playbackRate = playbackSpeed;
+        audioRef.current.play().catch(() => {});
+        setIsPlaying(true);
+      },
+      onPause: () => {
+        if (!audioRef.current) return;
+        isManualPauseRef.current = true;
+        audioRef.current.pause();
+        setIsPlaying(false);
+      },
+      onStop: () => {
+        if (!audioRef.current) return;
+        isManualPauseRef.current = true;
+        audioRef.current.pause();
+        audioRef.current.currentTime = 0;
+        setCurrentTime(0);
+        setIsPlaying(false);
+        mediaSessionManager.deactivateMedia(mediaId);
+      },
+      onSeekTo: (time: number) => {
+        if (!audioRef.current) return;
+        audioRef.current.currentTime = Math.max(0, Math.min(effectiveDur, time));
+        setCurrentTime(audioRef.current.currentTime);
+      },
+      onInterruptPause: () => {
+        if (!audioRef.current) return;
+        isManualPauseRef.current = true;
+        audioRef.current.pause();
+        setIsPlaying(false);
+      },
+      onInterruptResume: () => {
+        if (!audioRef.current) return;
+        audioRef.current.playbackRate = playbackSpeed;
+        audioRef.current.play().catch(() => {});
+        setIsPlaying(true);
+      }
+    });
+
+    a.playbackRate = playbackSpeed;
+    a.play().catch(() => {});
+    setIsPlaying(true);
+  };
+
   const togglePlay = () => {
     if (!audioRef.current) return;
     if (isPlaying) {
+      isManualPauseRef.current = true;
       audioRef.current.pause();
       setIsPlaying(false);
+      mediaSessionManager.updateMediaState(mediaId, { isPlaying: false });
     } else {
-      audioRef.current.playbackRate = playbackSpeed;
-      audioRef.current.play().catch(() => {});
-      setIsPlaying(true);
+      registerAndPlay();
     }
   };
 
@@ -409,14 +516,8 @@ export const VoicePlayer: React.FC<VoicePlayerProps> = ({ audioUrl, duration = 3
     setPlaybackSpeed(nextSpeed);
     if (audioRef.current) {
       audioRef.current.playbackRate = nextSpeed;
+      mediaSessionManager.updateMediaState(mediaId, { playbackRate: nextSpeed });
     }
-  };
-
-  const formatSecs = (s: number) => {
-    const total = Math.max(0, Math.floor(s));
-    const m = Math.floor(total / 60);
-    const sec = total % 60;
-    return `${m < 10 ? '0' : ''}${m}:${sec < 10 ? '0' : ''}${sec}`;
   };
 
   const effectiveDuration = Math.max(1, actualDuration);

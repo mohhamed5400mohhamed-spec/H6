@@ -152,6 +152,7 @@ import {
   requestNotificationPermission,
   notifyPrivateMessage,
   notifyMention,
+  sendBrowserNotification,
   sendTestNotification,
   listenToNotificationClicks,
   registerNotificationServiceWorker
@@ -164,12 +165,15 @@ import {
   resumeKeepAliveAudio,
   isKeepAliveAudioPlaying,
   updateMediaSessionMetadata,
+  ensureBackgroundStreamForYouTube,
+  notifySocketActivity,
   startHeartbeatWorker,
   stopHeartbeatWorker,
   setupVisibilityResync,
   setPresenceAwayDelayMs,
   uploadMediaWithProgress
 } from './utils/connectionKeepAlive';
+import { mediaSessionManager } from './utils/mediaSessionManager';
 import { getCountryNameFromFlag, generateDeviceFingerprint, detectIncognitoMode } from './utils/countryDetect';
 import {
   EmblemItem,
@@ -407,6 +411,7 @@ export default function App() {
   const [showConnectionDetailsModal, setShowConnectionDetailsModal] = useState<boolean>(false);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const currentUserRef = useRef<User | null>(null);
+  const roomEntryTimestampRef = useRef<number>(Date.now());
   useEffect(() => {
     currentUserRef.current = currentUser;
   }, [currentUser]);
@@ -756,6 +761,14 @@ export default function App() {
   const [searchUserQuery, setSearchUserQuery] = useState('');
   const [rosterUsers, setRosterUsers] = useState<User[]>([]);
   const [allConnectedUsers, setAllConnectedUsers] = useState<User[]>([]);
+  const rosterUsersRef = useRef<User[]>([]);
+  const allConnectedUsersRef = useRef<User[]>([]);
+  useEffect(() => {
+    rosterUsersRef.current = rosterUsers;
+  }, [rosterUsers]);
+  useEffect(() => {
+    allConnectedUsersRef.current = allConnectedUsers;
+  }, [allConnectedUsers]);
   const [allRegisteredMembers, setAllRegisteredMembers] = useState<Array<{
     username: string;
     role: string;
@@ -875,6 +888,11 @@ export default function App() {
   const floatingVideoRef = useRef<HTMLVideoElement | null>(null);
   const floatingAudioRef = useRef<HTMLAudioElement | null>(null);
   const youtubeIframeRef = useRef<HTMLIFrameElement | null>(null);
+  const floatingVideoStateRef = useRef(floatingVideo);
+  useEffect(() => {
+    floatingVideoStateRef.current = floatingVideo;
+  }, [floatingVideo]);
+  const isFloatingManualPauseRef = useRef<boolean>(false);
   const floatingDragRef = useRef<{
     startX: number;
     startY: number;
@@ -1121,6 +1139,15 @@ export default function App() {
     isInitiator: boolean;
   } | null>(null);
 
+  // Coordinate Private Call audio focus with MediaSessionManager
+  useEffect(() => {
+    if (activeCall || incomingCall) {
+      mediaSessionManager.enterCallMode();
+    } else if (!audioManagerRef.current?.isInVoice) {
+      mediaSessionManager.exitCallMode();
+    }
+  }, [activeCall, incomingCall]);
+
   // Dynamic Monitored Filter Words State
   const [monitoredWordsList, setMonitoredWordsList] = useState<string[]>([
     'سب', 'شتم', 'قذف', 'لعن', 'طرد', 'كود', 'هكر', 'اخترق', 'سكس', 'اباحي',
@@ -1201,15 +1228,16 @@ export default function App() {
 
   useEffect(() => {
     if (currentUser && keepAlivePlayerEnabled) {
-      updateMediaSessionMetadata({
+      const info = {
         title: `شات حسان برو | ${currentUser.room || 'الغرفة العامة'} 💬`,
         artist: `${currentUser.username} • متصل ونشط في الخلفية 🟢 • انقر للعودة`,
         album: typeof window !== 'undefined' ? (window.location.hostname || 'شات حسان برو') : 'شات حسان برو'
-      });
-      startSilentAudioKeepAlive({
-        title: `شات حسان برو | ${currentUser.room || 'الغرفة العامة'} 💬`,
-        artist: `${currentUser.username} • متصل ونشط في الخلفية 🟢 • انقر للعودة`
-      });
+      };
+      if (isKeepAliveAudioPlaying()) {
+        updateMediaSessionMetadata(info);
+      } else {
+        startSilentAudioKeepAlive(info);
+      }
       setIsKeepAlivePlayingState(true);
     } else if (!keepAlivePlayerEnabled) {
       stopSilentAudioKeepAlive();
@@ -2028,104 +2056,48 @@ export default function App() {
     }, 4000);
   };
 
-  // 1. Unified Starting Method for Floating Video with immediate user gesture audio activation
-  const handleStartFloatingVideo = useCallback((videoData: {
-    url: string;
-    title: string;
-    type?: 'video' | 'youtube';
-    youtubeId?: string;
-    author?: string;
-    postId?: string;
-    currentTime?: number;
-  }) => {
-    // Stop the silent keepalive loop so it does NOT fight for or steal Android/iOS audio focus!
-    stopSilentAudioKeepAlive();
-
-    const isVid = (videoData.type || 'video') === 'video';
-
-    // Synchronous direct audio stream activation (inside the user's click/touch event call stack)
-    if (isVid && floatingAudioRef.current) {
-      try {
-        floatingAudioRef.current.src = videoData.url;
-        if (videoData.currentTime && videoData.currentTime > 0) {
-          floatingAudioRef.current.currentTime = videoData.currentTime;
-        }
-        floatingAudioRef.current.muted = false;
-        const playPromise = floatingAudioRef.current.play();
-        if (playPromise !== undefined) {
-          playPromise.catch((err) => {
-            console.warn('Audio play error', err);
-          });
-        }
-      } catch (err) {
-        console.warn('Sync audio load error', err);
+  // 1. Unified Starting Method for Floating Video / YouTube with Native MediaSession & Call Interruption Support
+  const handlePlayFloatingMedia = useCallback(() => {
+    isFloatingManualPauseRef.current = false;
+    const currentFloating = floatingVideoStateRef.current;
+    if (currentFloating?.type === 'youtube') {
+      ensureBackgroundStreamForYouTube();
+      if (youtubeIframeRef.current) {
+        youtubeIframeRef.current.contentWindow?.postMessage('{"event":"command","func":"playVideo","args":""}', '*');
+      }
+    } else {
+      if (floatingAudioRef.current) {
+        floatingAudioRef.current.play().catch(() => {});
+      }
+      if (floatingVideoRef.current) {
+        floatingVideoRef.current.play().catch(() => {});
       }
     }
-
-    setFloatingVideo({
-      url: videoData.url,
-      title: videoData.title,
-      type: videoData.type || 'video',
-      author: videoData.author,
-      postId: videoData.postId,
-      youtubeId: videoData.youtubeId,
-      currentTime: videoData.currentTime || 0
-    });
     setIsFloatingVideoPlaying(true);
-    setIsFloatingVideoMinimized(false);
-    setIsFloatingVideoMuted(false);
-
-    requestScreenWakeLock().catch(() => {});
-
-    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
-      try {
-        navigator.mediaSession.metadata = new MediaMetadata({
-          title: videoData.title || 'فيديو الحائط المستمر',
-          artist: videoData.author ? `@${videoData.author}` : 'شات حسان برو',
-          album: 'حائط شات حسان برو',
-          artwork: [
-            { src: '/favicon.svg', sizes: '192x192', type: 'image/svg+xml' },
-            { src: '/favicon.svg', sizes: '512x512', type: 'image/svg+xml' }
-          ]
-        });
-        navigator.mediaSession.playbackState = 'playing';
-      } catch {}
+    if (currentFloating) {
+      const mediaId = `floating-${currentFloating.postId || currentFloating.youtubeId || 'video'}`;
+      mediaSessionManager.updateMediaState(mediaId, { isPlaying: true });
     }
   }, []);
 
-  // Synchronized Play / Pause across Video, Native Audio & YouTube
-  const handlePlayFloatingMedia = useCallback(() => {
-    stopSilentAudioKeepAlive();
-    if (floatingAudioRef.current) {
-      floatingAudioRef.current.play().catch(() => {});
-    }
-    if (floatingVideoRef.current) {
-      floatingVideoRef.current.play().catch(() => {});
-    }
-    if (floatingVideo?.type === 'youtube' && youtubeIframeRef.current) {
-      youtubeIframeRef.current.contentWindow?.postMessage('{"event":"command","func":"playVideo","args":""}', '*');
-    }
-    setIsFloatingVideoPlaying(true);
-    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
-      navigator.mediaSession.playbackState = 'playing';
-    }
-  }, [floatingVideo]);
-
-  const handlePauseFloatingMedia = useCallback(() => {
+  const handlePauseFloatingMedia = useCallback((isInterruption = false) => {
+    isFloatingManualPauseRef.current = true;
+    const currentFloating = floatingVideoStateRef.current;
     if (floatingAudioRef.current) {
       floatingAudioRef.current.pause();
     }
     if (floatingVideoRef.current) {
       floatingVideoRef.current.pause();
     }
-    if (floatingVideo?.type === 'youtube' && youtubeIframeRef.current) {
+    if (currentFloating?.type === 'youtube' && youtubeIframeRef.current) {
       youtubeIframeRef.current.contentWindow?.postMessage('{"event":"command","func":"pauseVideo","args":""}', '*');
     }
     setIsFloatingVideoPlaying(false);
-    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
-      navigator.mediaSession.playbackState = 'paused';
+    if (currentFloating && !isInterruption) {
+      const mediaId = `floating-${currentFloating.postId || currentFloating.youtubeId || 'video'}`;
+      mediaSessionManager.updateMediaState(mediaId, { isPlaying: false });
     }
-  }, [floatingVideo]);
+  }, []);
 
   // Native Picture-in-Picture for Videos (صورة داخل صورة فوق كل التطبيقات)
   const handleTogglePiP = useCallback(async () => {
@@ -2142,6 +2114,8 @@ export default function App() {
   }, []);
 
   const handleStopFloatingVideo = useCallback(() => {
+    const currentFloating = floatingVideoStateRef.current;
+    isFloatingManualPauseRef.current = true;
     if (floatingAudioRef.current) {
       floatingAudioRef.current.pause();
       floatingAudioRef.current.src = '';
@@ -2153,93 +2127,129 @@ export default function App() {
     if (youtubeIframeRef.current) {
       youtubeIframeRef.current.contentWindow?.postMessage('{"event":"command","func":"stopVideo","args":""}', '*');
     }
+    if (currentFloating) {
+      const mediaId = `floating-${currentFloating.postId || currentFloating.youtubeId || 'video'}`;
+      mediaSessionManager.deactivateMedia(mediaId);
+    }
     setFloatingVideo(null);
     setPlayingYouTubePostId(null);
     setIsFloatingVideoPlaying(false);
-    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
-      navigator.mediaSession.playbackState = 'none';
-    }
     if (keepAlivePlayerEnabled) {
       startSilentAudioKeepAlive({
-        title: `شات حسان برو | ${currentUser?.room || 'الغرفة العامة'} 💬`,
-        artist: `${currentUser?.username || 'عضو'} • متصل ونشط 🟢`
+        title: `شات حسان برو | ${currentUserRef.current?.room || 'الغرفة العامة'} 💬`,
+        artist: `${currentUserRef.current?.username || 'عضو'} • متصل ونشط 🟢`
       });
     }
-    showToast('تم إيقاف تشغيل الفيديو يدوياً ⏹️', 'info');
-  }, [keepAlivePlayerEnabled, currentUser]);
+    showToast('تم إيقاف تشغيل المقطع يدوياً ⏹️', 'info');
+  }, [keepAlivePlayerEnabled]);
 
-  // Background Audio & Screen Sleep Prevention when Floating Video is Active
-  useEffect(() => {
-    if (!floatingVideo) return;
+  const handleStartFloatingVideo = useCallback((videoData: {
+    url: string;
+    title: string;
+    type?: 'video' | 'youtube';
+    youtubeId?: string;
+    author?: string;
+    postId?: string;
+    currentTime?: number;
+  }) => {
+    isFloatingManualPauseRef.current = false;
+    const isVid = (videoData.type || 'video') === 'video';
+    const mediaId = `floating-${videoData.postId || videoData.youtubeId || 'video'}`;
 
-    // 1. Prevent screen from dimming/sleeping automatically
+    if (isVid && floatingAudioRef.current) {
+      try {
+        floatingAudioRef.current.src = videoData.url;
+        if (videoData.currentTime && videoData.currentTime > 0) {
+          floatingAudioRef.current.currentTime = videoData.currentTime;
+        }
+        floatingAudioRef.current.muted = false;
+        const playPromise = floatingAudioRef.current.play();
+        if (playPromise !== undefined) {
+          playPromise.catch((err) => {
+            console.warn('Audio play error', err);
+          });
+        }
+      } catch (err) {
+        console.warn('Sync audio load error', err);
+      }
+    } else if (!isVid) {
+      // Keep hidden silent MediaStream alive underneath cross-origin YouTube iframe so OS doesn't freeze background socket
+      ensureBackgroundStreamForYouTube();
+    }
+
+    const nextFloating = {
+      url: videoData.url,
+      title: videoData.title,
+      type: videoData.type || 'video',
+      author: videoData.author,
+      postId: videoData.postId,
+      youtubeId: videoData.youtubeId,
+      currentTime: videoData.currentTime || 0
+    };
+    floatingVideoStateRef.current = nextFloating;
+    setFloatingVideo(nextFloating);
+    setIsFloatingVideoPlaying(true);
+    setIsFloatingVideoMinimized(false);
+    setIsFloatingVideoMuted(false);
+
     requestScreenWakeLock().catch(() => {});
 
-    // 2. Setup MediaSession for background audio & lockscreen controls
-    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
-      try {
-        navigator.mediaSession.metadata = new MediaMetadata({
-          title: floatingVideo.title || 'فيديو الحائط المستمر',
-          artist: floatingVideo.author ? `@${floatingVideo.author}` : 'شات حسان برو',
-          album: 'حائط الشات الصوتي',
-          artwork: [
-            { src: '/favicon.svg', sizes: '192x192', type: 'image/svg+xml' },
-            { src: '/favicon.svg', sizes: '512x512', type: 'image/svg+xml' }
-          ]
-        });
-        navigator.mediaSession.playbackState = isFloatingVideoPlaying ? 'playing' : 'paused';
+    const artwork = videoData.youtubeId ? getYouTubeThumbnailUrl(videoData.youtubeId) : '/favicon.svg';
+    mediaSessionManager.activateMedia({
+      id: mediaId,
+      kind: isVid ? 'wall-video' : 'wall-youtube',
+      title: videoData.title || 'فيديو الحائط المستمر',
+      artist: videoData.author ? `@${videoData.author} • شات حسان برو` : 'حائط شات حسان برو',
+      album: 'وسائط الحائط والدردشة',
+      artworkUrl: artwork,
+      currentTime: videoData.currentTime || 0,
+      playbackRate: 1,
+      isPlaying: true,
+      onPlay: () => handlePlayFloatingMedia(),
+      onPause: () => handlePauseFloatingMedia(false),
+      onStop: () => handleStopFloatingVideo(),
+      onSeekTo: (seekTime: number) => {
+        if (floatingAudioRef.current) floatingAudioRef.current.currentTime = seekTime;
+        if (floatingVideoRef.current) floatingVideoRef.current.currentTime = seekTime;
+        mediaSessionManager.updateMediaState(mediaId, { currentTime: seekTime });
+      },
+      onInterruptPause: () => handlePauseFloatingMedia(true),
+      onInterruptResume: () => handlePlayFloatingMedia()
+    });
+  }, [handlePlayFloatingMedia, handlePauseFloatingMedia, handleStopFloatingVideo]);
 
-        navigator.mediaSession.setActionHandler('play', () => {
-          handlePlayFloatingMedia();
-        });
-        navigator.mediaSession.setActionHandler('pause', () => {
-          handlePauseFloatingMedia();
-        });
-        navigator.mediaSession.setActionHandler('seekto', (details) => {
-          if (details.seekTime !== undefined) {
-            if (floatingAudioRef.current) floatingAudioRef.current.currentTime = details.seekTime;
-            if (floatingVideoRef.current) floatingVideoRef.current.currentTime = details.seekTime;
-          }
-        });
-        navigator.mediaSession.setActionHandler('stop', () => {
-          handleStopFloatingVideo();
-        });
-      } catch {}
-    }
-  }, [floatingVideo, isFloatingVideoPlaying, handlePlayFloatingMedia, handlePauseFloatingMedia, handleStopFloatingVideo]);
-
-  // Keep Audio and Video Synchronized across background, app switching & lockscreen
+  // Keep visual <video> synchronized with background <audio> on foreground return without stopping Keep-Alive
   useEffect(() => {
     const handleVisibility = () => {
+      const currentFloating = floatingVideoStateRef.current;
+      if (!currentFloating) return;
+
       if (document.visibilityState === 'hidden') {
-        // When tab is hidden / screen locked:
-        if (floatingVideo) {
-          stopSilentAudioKeepAlive();
-          if (floatingVideo.type === 'youtube' && isFloatingVideoPlaying && youtubeIframeRef.current) {
+        if (currentFloating.type === 'youtube' && isFloatingVideoPlaying) {
+          ensureBackgroundStreamForYouTube();
+          if (youtubeIframeRef.current) {
             youtubeIframeRef.current.contentWindow?.postMessage('{"event":"command","func":"playVideo","args":""}', '*');
           }
-          // If native PiP is supported, try auto-pip
-          if (typeof document !== 'undefined' && (document as any).pictureInPictureEnabled && !(document as any).pictureInPictureElement) {
-            floatingVideoRef.current?.requestPictureInPicture?.().catch(() => {});
-          }
+        }
+        if (
+          currentFloating.type === 'video' &&
+          typeof document !== 'undefined' &&
+          (document as any).pictureInPictureEnabled &&
+          !(document as any).pictureInPictureElement
+        ) {
+          floatingVideoRef.current?.requestPictureInPicture?.().catch(() => {});
         }
       } else {
-        // When user returns to chat:
-        // Sync <video> visual frames to <audio> currentTime!
-        if (floatingVideo && floatingVideo.type === 'video') {
-          stopSilentAudioKeepAlive();
-          if (floatingAudioRef.current && floatingVideoRef.current) {
-            const audioCur = floatingAudioRef.current.currentTime;
-            if (Math.abs(floatingVideoRef.current.currentTime - audioCur) > 0.2) {
-              floatingVideoRef.current.currentTime = audioCur;
-            }
-            if (isFloatingVideoPlaying) {
-              if (floatingAudioRef.current.paused) floatingAudioRef.current.play().catch(() => {});
-              if (floatingVideoRef.current.paused) floatingVideoRef.current.play().catch(() => {});
-            }
+        if (currentFloating.type === 'video' && floatingAudioRef.current && floatingVideoRef.current) {
+          const audioCur = floatingAudioRef.current.currentTime;
+          if (Math.abs(floatingVideoRef.current.currentTime - audioCur) > 0.25) {
+            floatingVideoRef.current.currentTime = audioCur;
           }
-        }
-        if (floatingVideo?.type === 'youtube' && isFloatingVideoPlaying && youtubeIframeRef.current) {
+          if (isFloatingVideoPlaying) {
+            if (floatingAudioRef.current.paused) floatingAudioRef.current.play().catch(() => {});
+            if (floatingVideoRef.current.paused) floatingVideoRef.current.play().catch(() => {});
+          }
+        } else if (currentFloating.type === 'youtube' && isFloatingVideoPlaying && youtubeIframeRef.current) {
           youtubeIframeRef.current.contentWindow?.postMessage('{"event":"command","func":"playVideo","args":""}', '*');
         }
       }
@@ -2249,7 +2259,7 @@ export default function App() {
     return () => {
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [floatingVideo, isFloatingVideoPlaying]);
+  }, [isFloatingVideoPlaying]);
 
   const toggleNightMode = useCallback(() => {
     setIsNightMode((prev) => {
@@ -2716,18 +2726,26 @@ export default function App() {
     const socketOptions = {
       reconnection: true,
       reconnectionAttempts: Infinity,
-      reconnectionDelay: 500,
+      reconnectionDelay: 400,
       reconnectionDelayMax: 1500,
       randomizationFactor: 0.1,
       timeout: 60000,
       transports: ['websocket', 'polling'],
+      upgrade: true,
+      rememberUpgrade: true,
       autoConnect: true
     };
     const s = remoteServerUrl ? io(remoteServerUrl, socketOptions) : io(socketOptions);
+    // Feed Zombie-Socket Pong Watchdog on every incoming server event
+    s.onAny(() => {
+      notifySocketActivity();
+    });
+
     // Safety fallback only if network/API is completely unresponsive after 3.5 seconds
     const appearanceFallbackTimer = window.setTimeout(() => setAppearanceReady(true), 3500);
 
     s.on('connect', () => {
+      notifySocketActivity();
       if (reconnectBannerTimerRef.current) {
         window.clearTimeout(reconnectBannerTimerRef.current);
         reconnectBannerTimerRef.current = null;
@@ -2750,7 +2768,8 @@ export default function App() {
           username: savedUsername,
           room: currentUserRef.current?.room || 'الغرفة العامة',
           deviceFingerprint: generateDeviceFingerprint().fingerprintId,
-          isIncognito: isIncognitoClient
+          isIncognito: isIncognitoClient,
+          presenceState: typeof document !== 'undefined' && document.hidden ? 'away' : 'online'
         });
       }
 
@@ -2775,6 +2794,7 @@ export default function App() {
 
     // Pong listener for live ping measurement (ms)
     s.on('keepAlivePong', (data: { timestamp: number; clientTimestamp?: number }) => {
+      notifySocketActivity();
       if (data?.clientTimestamp) {
         const latency = Math.max(1, Date.now() - data.clientTimestamp);
         setPingLatency(latency);
@@ -3635,6 +3655,7 @@ export default function App() {
     s.on('roomJoined', ({ user }: { user: User }) => {
       setCurrentUser(user);
       currentUserRef.current = user;
+      roomEntryTimestampRef.current = Date.now();
       // Clean Room Mode: Fresh start when entering any room
       setMessages([]);
     });
@@ -3648,6 +3669,7 @@ export default function App() {
     });
 
     s.on('loginSuccess', ({ user, sessionToken }: { user: User; sessionToken?: string }) => {
+      roomEntryTimestampRef.current = Date.now();
       setCurrentUser(user);
       setSettingName(user.username);
       setSettingQuote(user.statusQuote);
@@ -3735,18 +3757,24 @@ export default function App() {
       }
       localStorage.setItem('soqoor_session_username', user.username);
       requestScreenWakeLock();
-      startSilentAudioKeepAlive();
+      if (keepAlivePlayerEnabled && !floatingVideoStateRef.current) {
+        startSilentAudioKeepAlive();
+      }
       startHeartbeatWorker(s);
       triggerAnnouncementDisplay(8000);
 
-      // Sync missed room messages from server that arrived while disconnected or in background
+      // Sync ONLY missed room messages since last message or room entry (never re-fetch history on live connection)
       const lastMsg = messagesRef.current[messagesRef.current.length - 1];
-      s.emit('syncRoomMessages', {
-        roomId: user.room || 'الغرفة العامة',
-        lastTimestamp: lastMsg ? lastMsg.timestamp : undefined
-      });
-      // Mark presence online immediately on session restoration
-      s.emit('userPresenceChange', { state: 'online' });
+      const sinceTs = lastMsg?.timestamp || roomEntryTimestampRef.current;
+      if (sinceTs) {
+        s.emit('syncRoomMessages', {
+          roomId: user.room || 'الغرفة العامة',
+          lastTimestamp: sinceTs
+        });
+      }
+      if (typeof document === 'undefined' || !document.hidden) {
+        s.emit('userPresenceChange', { state: 'online' });
+      }
     });
 
     s.on('sessionRestoreFailed', (data?: { reason?: string }) => {
@@ -3828,25 +3856,23 @@ export default function App() {
             }
           } else if (msg.badge && (msg.badge.includes('إشعار عام') || msg.badge.includes('إدارة') || msg.badge.includes('إعلان') || msg.badge.includes('تنبيه'))) {
             sounds.playGeneralAlertPing();
-            if (typeof document !== 'undefined' && document.hidden && !allNotificationsDisabledRef.current && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-              try {
-                new Notification(`📢 إشعار عام من ${msg.username}`, {
-                  body: msg.text || 'إشعار جديد في الغرفة',
-                  icon: msg.avatarUrl || falconIcon,
-                  tag: `alert-${msg.id}`
-                });
-              } catch {}
+            if (typeof document !== 'undefined' && document.hidden && !allNotificationsDisabledRef.current) {
+              sendBrowserNotification({
+                title: `📢 إشعار عام من ${msg.username}`,
+                body: msg.text || 'إشعار جديد في الغرفة',
+                icon: msg.avatarUrl || falconIcon,
+                tag: `alert-${msg.id}`
+              }).catch(() => {});
             }
           } else {
             sounds.playMessagePing();
-            if (typeof document !== 'undefined' && document.hidden && !allNotificationsDisabledRef.current && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-              try {
-                new Notification(`💬 ${msg.username} (${msg.room || currentU.room})`, {
-                  body: msg.text || (msg.voiceNote ? '🎙️ رسالة صوتية' : '📎 مرفق وسائط'),
-                  icon: msg.avatarUrl || falconIcon,
-                  tag: `room-msg-${msg.room || 'general'}`
-                });
-              } catch {}
+            if (typeof document !== 'undefined' && document.hidden && !allNotificationsDisabledRef.current) {
+              sendBrowserNotification({
+                title: `💬 ${msg.username} (${msg.room || currentU.room})`,
+                body: msg.text || (msg.voiceNote ? '🎙️ رسالة صوتية' : '📎 مرفق وسائط'),
+                icon: msg.avatarUrl || falconIcon,
+                tag: `room-msg-${msg.room || 'general'}`
+              }).catch(() => {});
             }
           }
         }
@@ -3998,8 +4024,8 @@ export default function App() {
               avatarUrl: pm.fromAvatar,
               onOpenPm: () => {
               const partner =
-                rosterUsers.find((u) => u.username.toLowerCase() === pm.fromUsername.toLowerCase()) ||
-                allConnectedUsers.find((u) => u.username.toLowerCase() === pm.fromUsername.toLowerCase()) || {
+                rosterUsersRef.current.find((u) => u.username.toLowerCase() === pm.fromUsername.toLowerCase()) ||
+                allConnectedUsersRef.current.find((u) => u.username.toLowerCase() === pm.fromUsername.toLowerCase()) || {
                   id: pm.fromId || `user-${pm.fromUsername}`,
                   username: pm.fromUsername,
                   room: 'الغرفة العامة',
@@ -4193,25 +4219,26 @@ export default function App() {
     setSocket(s);
 
     // Setup visibility & phone screen unlock keep-alive synchronization
-    const cleanupVisibility = setupVisibilityResync(s, () => {
-      let currentRoom = currentUserRef.current?.room || 'الغرفة العامة';
+    const cleanupVisibility = setupVisibilityResync(s, (wasDisconnected) => {
+      if (!wasDisconnected) {
+        // Socket stayed connected in background and received all events live; no redundant reload needed!
+        return;
+      }
+      const currentRoom = currentUserRef.current?.room || 'الغرفة العامة';
       if (s.connected) {
-        // Socket is connected: sync missed room messages seamlessly
         const roomMsgs = messagesRef.current.filter(
           (m) => m && m.room && m.room.trim().toLowerCase() === currentRoom.trim().toLowerCase()
         );
         const lastMsg = roomMsgs[roomMsgs.length - 1];
-        if (lastMsg?.timestamp) {
+        const sinceTs = lastMsg?.timestamp || roomEntryTimestampRef.current;
+        if (sinceTs) {
           s.emit('syncRoomMessages', {
             roomId: currentRoom,
-            lastTimestamp: lastMsg.timestamp
+            lastTimestamp: sinceTs
           });
         }
-      } else {
-        // If disconnected upon returning, trigger reconnect if idle; s.on('connect') handles session restoration cleanly
-        if (s.disconnected) {
-          s.connect();
-        }
+      } else if (s.disconnected) {
+        s.connect();
       }
     });
 
@@ -5066,6 +5093,7 @@ export default function App() {
 
     const ok = await audioManager.takeMicSlot(slotNumber);
     if (ok) {
+      mediaSessionManager.enterCallMode();
       sounds.playVoiceJoin();
       showToast(`صعدت الآن إلى المايك رقم (${slotNumber}) 🎙️`, 'success');
       confetti({ particleCount: 30, spread: 50 });
@@ -5079,6 +5107,7 @@ export default function App() {
     if (audioManager) {
       audioManager.dropMicSlot();
     }
+    mediaSessionManager.exitCallMode();
     setCurrentUser((prev) => (prev ? { ...prev, micSlot: null, isVoice: false } : null));
     sounds.playVoiceLeave();
     showToast('تم النزول من المايك بنجاح 👋', 'info');
@@ -6774,6 +6803,7 @@ export default function App() {
                           audioUrl={pm.voiceNote.audioUrl}
                           duration={pm.voiceNote.duration}
                           isMe={isMe}
+                          senderName={pm.fromUsername}
                         />
                       </div>
                     )}
@@ -10147,6 +10177,7 @@ export default function App() {
                           audioUrl={msg.voiceNote.audioUrl}
                           duration={msg.voiceNote.duration}
                           isMe={Boolean(currentUser && msg.username === currentUser.username)}
+                          senderName={msg.username}
                         />
                       </div>
                     )}
@@ -16879,13 +16910,52 @@ export default function App() {
           </div>
         )}
 
-        {/* 🎵 ULTRA-RESILIENT BACKGROUND AUDIO ENGINE (مشغل الصوت بالخلفية دائم التثبيت في الـ DOM ولا يتوقف أبداً عند قفل الشاشة أو التنقل بين التطبيقات) */}
+        {/* 🎵 ULTRA-RESILIENT BACKGROUND AUDIO ENGINE (مشغل الصوت بالخلفية دائم التثبيت في الـ DOM ومربوط بـ MediaSessionManager) */}
         <audio
           ref={floatingAudioRef}
           id="persistent-wall-audio"
           playsInline
           preload="auto"
           muted={isFloatingVideoMuted}
+          onLoadedMetadata={(e) => {
+            const el = e.currentTarget;
+            const cur = floatingVideoStateRef.current;
+            if (cur && el.duration && isFinite(el.duration)) {
+              const mediaId = `floating-${cur.postId || cur.youtubeId || 'video'}`;
+              mediaSessionManager.updateMediaState(mediaId, { duration: el.duration });
+            }
+          }}
+          onTimeUpdate={(e) => {
+            const el = e.currentTarget;
+            const cur = floatingVideoStateRef.current;
+            if (cur && el.duration && isFinite(el.duration)) {
+              const mediaId = `floating-${cur.postId || cur.youtubeId || 'video'}`;
+              mediaSessionManager.updateMediaState(mediaId, {
+                currentTime: el.currentTime,
+                duration: el.duration,
+                playbackRate: el.playbackRate || 1
+              });
+            }
+          }}
+          onPlay={() => {
+            isFloatingManualPauseRef.current = false;
+            setIsFloatingVideoPlaying(true);
+            const cur = floatingVideoStateRef.current;
+            if (cur) {
+              const mediaId = `floating-${cur.postId || cur.youtubeId || 'video'}`;
+              mediaSessionManager.updateMediaState(mediaId, { isPlaying: true });
+            }
+          }}
+          onPause={(e) => {
+            const el = e.currentTarget;
+            setIsFloatingVideoPlaying(false);
+            const cur = floatingVideoStateRef.current;
+            if (cur && !isFloatingManualPauseRef.current && !el.ended) {
+              const mediaId = `floating-${cur.postId || cur.youtubeId || 'video'}`;
+              mediaSessionManager.notifyUnexpectedElementPause(mediaId);
+            }
+            isFloatingManualPauseRef.current = false;
+          }}
           onEnded={() => {
             showToast('انتهى تشغيل الفيديو 🎬', 'info');
             handleStopFloatingVideo();
