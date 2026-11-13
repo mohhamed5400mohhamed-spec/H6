@@ -139,9 +139,9 @@ export class LocalStorageAdapter implements IStorageAdapter {
       else extension = 'jpg';
     }
 
-    const isVideo = ['mp4', 'webm', 'mov', 'ogg', 'mkv'].includes(extension) || mime.startsWith('video');
-    const isAudio = ['mp3', 'wav', 'ogg', 'aac', 'm4a'].includes(extension) || mime.startsWith('audio');
-    const isImage = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'svg'].includes(extension) || mime.startsWith('image');
+    const isVideo = ['mp4', 'webm', 'mov', 'ogg', 'mkv'].includes(extension) || mime.startsWith('video/');
+    const isAudio = ['mp3', 'wav', 'ogg', 'aac', 'm4a'].includes(extension) || mime.startsWith('audio/');
+    const isImage = ['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(extension) || (mime.startsWith('image/') && !mime.includes('svg'));
 
     const mediaType = isVideo ? 'video' : isAudio ? 'audio' : isImage ? 'image' : 'file';
     return { extension, mediaType };
@@ -184,15 +184,24 @@ export class LocalStorageAdapter implements IStorageAdapter {
     const targetFilePath = path.join(targetDir, safeFilename);
     const writeStream = fs.createWriteStream(targetFilePath);
 
+    const MAX_STREAM_BYTES = 25 * 1024 * 1024;
     return new Promise((resolve, reject) => {
       let bytesReceived = 0;
+      let aborted = false;
       stream.on('data', (chunk: Buffer) => {
         bytesReceived += chunk.length;
+        if (bytesReceived > MAX_STREAM_BYTES && !aborted) {
+          aborted = true;
+          writeStream.destroy();
+          fs.promises.unlink(targetFilePath).catch(() => {});
+          reject(new Error('حجم الملف يتجاوز الحد الأقصى المسموح به (25 ميجابايت).'));
+        }
       });
 
       stream.pipe(writeStream);
 
       writeStream.on('finish', () => {
+        if (aborted) return;
         const publicUrl = folder ? `/uploads/${folder}/${safeFilename}` : `/uploads/${safeFilename}`;
         resolve({
           success: true,
@@ -206,7 +215,7 @@ export class LocalStorageAdapter implements IStorageAdapter {
       });
 
       writeStream.on('error', (err) => {
-        reject(err);
+        if (!aborted) reject(err);
       });
     });
   }
@@ -315,9 +324,16 @@ export class ExternalCloudStorageAdapter implements IStorageAdapter {
     // Collect stream into buffer if external upload is enabled
     if (this.config.endpoint) {
       try {
+        const MAX_STREAM_BYTES = 25 * 1024 * 1024;
+        let totalBytes = 0;
         const chunks: Buffer[] = [];
         for await (const chunk of stream) {
-          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          totalBytes += buf.length;
+          if (totalBytes > MAX_STREAM_BYTES) {
+            throw new Error('حجم الملف يتجاوز الحد الأقصى المسموح به (25 ميجابايت).');
+          }
+          chunks.push(buf);
         }
         const fullBuffer = Buffer.concat(chunks);
         return this.saveBuffer(fullBuffer, originalFilename, mimeType, folder);
@@ -411,7 +427,7 @@ export class CloudinaryStorageAdapter implements IStorageAdapter {
     const ext = path.extname(filename).replace('.', '').toLowerCase();
     const mime = (mimeType || '').toLowerCase();
 
-    if (mime.startsWith('image/') || ['jpg', 'jpeg', 'png', 'webp', 'gif', 'svg'].includes(ext)) {
+    if ((mime.startsWith('image/') && !mime.includes('svg')) || ['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(ext)) {
       return 'image';
     }
     if (mime.startsWith('video/') || ['mp4', 'webm', 'mov', 'avi', 'mkv'].includes(ext)) {

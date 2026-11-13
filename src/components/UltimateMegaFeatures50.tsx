@@ -443,23 +443,34 @@ export const UltimateMegaFeatures50: React.FC<UltimateMegaFeatures50Props> = ({
   const [multiplierTier, setMultiplierTier] = useState<1 | 2 | 3>(2);
   const [isBoosterActive, setIsBoosterActive] = useState<boolean>(false);
 
-  // Periodic simulated stats & audio canvas
+  // Stable VIP guest pass code & real network/FPS listeners
+  const [guestInviteCode] = useState<string>(() => Math.random().toString(36).substring(2, 8).toUpperCase());
+
   useEffect(() => {
     const handleOnline = () => setIsOnline(true);
     const handleOffline = () => setIsOnline(false);
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
 
-    const statsInterval = setInterval(() => {
-      // Fluctuate ping slightly for realism
-      setWebrtcPing((prev) => Math.max(22, Math.min(65, prev + (Math.random() * 6 - 3))));
-      setLiveFps((prev) => Math.max(57, Math.min(60, Math.round(58 + Math.random() * 2))));
-    }, 2500);
+    let frameCount = 0;
+    let lastTime = performance.now();
+    let rafId: number | null = null;
+    const tick = (now: number) => {
+      frameCount += 1;
+      const elapsed = now - lastTime;
+      if (elapsed >= 1500) {
+        setLiveFps(Math.min(120, Math.round((frameCount * 1000) / elapsed)));
+        frameCount = 0;
+        lastTime = now;
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
 
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
-      clearInterval(statsInterval);
+      if (rafId !== null) cancelAnimationFrame(rafId);
     };
   }, []);
 
@@ -1649,15 +1660,16 @@ export const UltimateMegaFeatures50: React.FC<UltimateMegaFeatures50Props> = ({
                   <input
                     type="text"
                     readOnly
-                    value={`${window.location.origin}?invite=${Math.random().toString(36).substring(2, 8)}`}
+                    value={`${window.location.origin}?invite=${guestInviteCode}`}
                     className="flex-1 bg-slate-900 border border-slate-750 rounded-xl px-2.5 py-1.5 text-xs text-slate-300 font-mono"
                   />
                   <button
                     onClick={() => {
-                      navigator.clipboard.writeText(window.location.href);
+                      const inviteUrl = `${window.location.origin}?invite=${guestInviteCode}`;
+                      navigator.clipboard.writeText(inviteUrl);
                       onShowToast('تم نسخ رابط الدعوة الخاص!', 'success');
                     }}
-                    className="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold px-3 py-1.5 rounded-xl text-xs flex items-center gap-1"
+                    className="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold px-3 py-1.5 rounded-xl text-xs flex items-center gap-1 cursor-pointer"
                   >
                     <Copy className="w-3.5 h-3.5" />
                     <span>نسخ</span>

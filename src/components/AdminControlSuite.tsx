@@ -417,6 +417,31 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
   const [customColorsForm, setCustomColorsForm] = useState<CustomThemeColors>({ ...DEFAULT_CUSTOM_THEME_COLORS });
   const [selectedBuiltInThemeToEdit, setSelectedBuiltInThemeToEdit] = useState<string>('pearl-gray-calm');
   const [themeEditMode, setThemeEditMode] = useState<'create' | 'editBuiltIn' | 'editCustom'>('create');
+  const [adminDialog, setAdminDialog] = useState<{
+    type: 'confirm' | 'prompt';
+    title: string;
+    message: string;
+    placeholder?: string;
+    defaultValue?: string;
+    inputType?: string;
+    onConfirm: (val: string) => void;
+  } | null>(null);
+  const [adminDialogInput, setAdminDialogInput] = useState('');
+  const openConfirmDialog = (title: string, message: string, onConfirm: () => void) => {
+    setAdminDialogInput('');
+    setAdminDialog({ type: 'confirm', title, message, onConfirm: () => onConfirm() });
+  };
+  const openPromptDialog = (
+    title: string,
+    message: string,
+    defaultValue: string,
+    onConfirm: (val: string) => void,
+    placeholder?: string,
+    inputType = 'text'
+  ) => {
+    setAdminDialogInput(defaultValue);
+    setAdminDialog({ type: 'prompt', title, message, defaultValue, placeholder, inputType, onConfirm });
+  };
 
   const handleLoadBuiltInThemeForEditing = (themeId: string) => {
     const meta = BUILT_IN_THEMES_FOR_EDITING.find((t) => t.id === themeId);
@@ -1307,9 +1332,13 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              if (confirm(`هل أنت متأكد من إنهاء وإسقاط جلسة [${sess.username}] وطرده فوراً؟`)) {
-                                socket?.emit('terminateSession', { sessionToken: sess.sessionToken });
-                              }
+                              openConfirmDialog(
+                                'إنهاء وإسقاط الجلسة',
+                                `هل أنت متأكد من إنهاء وإسقاط جلسة [${sess.username}] وطرده فوراً؟`,
+                                () => {
+                                  socket?.emit('terminateSession', { sessionToken: sess.sessionToken });
+                                }
+                              );
                             }}
                             className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-black text-[11px] flex items-center gap-1.5 cursor-pointer shadow-xs"
                           >
@@ -1401,7 +1430,7 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
                               {m.statusQuote || 'عضو في حسان برو'}
                             </div>
                             <div className="flex flex-wrap items-center gap-1.5 text-[9px] text-slate-400 mt-0.5 font-mono">
-                              <span>🌐 {m.ipAddress || '192.168.1.1'}</span>
+                              <span>🌐 {m.ipAddress || 'غير مسجل'}</span>
                               <span>•</span>
                               <span>📱 {m.deviceInfo || 'جهاز ذكي'}</span>
                               <span>•</span>
@@ -1459,10 +1488,14 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              if (confirm(`هل أنت متأكد من حظر [${m.username}] وعنوان الـ IP [${m.ipAddress || ''}] نهائياً؟`)) {
-                                onAdminAction('ban', m.username, 'حظر إداري دائم يشمل عنوان الـ IP والحسابات');
-                                showToast(`تم تطبيق الباند وحظر الـ IP لـ [${m.username}]`, 'success');
-                              }
+                              openConfirmDialog(
+                                'حظر وباند IP',
+                                `هل أنت متأكد من حظر [${m.username}] وعنوان الـ IP [${m.ipAddress || 'غير مسجل'}] نهائياً؟`,
+                                () => {
+                                  onAdminAction('ban', m.username, 'حظر إداري دائم يشمل عنوان الـ IP والحسابات');
+                                  showToast(`تم تطبيق الباند وحظر الـ IP لـ [${m.username}]`, 'success');
+                                }
+                              );
                             }}
                             className="px-2 py-1 rounded-lg bg-red-600 hover:bg-red-700 text-white font-bold flex items-center gap-1 cursor-pointer transition-colors shadow-xs"
                             title="حظر العضوية والـ IP نهائياً ومنع الدخول كزائر أو تسجيل جديد"
@@ -1510,21 +1543,27 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
                                 .sort((a, b) => b.level - a.level)
                                 .map((r) => `${r.id} (${r.name} - #${r.level})`)
                                 .join('\n');
-                              const r = prompt(`اختر معرف الرتبة الجديدة:\n${roleListStr}`, m.role);
-                              if (r && r.trim()) {
-                                const clean = r.trim().toLowerCase();
-                                const found = rolesConfig.find((x) => x.id.toLowerCase() === clean);
-                                if (found || ['hassan', 'admin', 'super', 'member', 'guest'].includes(clean)) {
-                                  if (!isSupremeHassan && getRoleLevel(clean) >= actorLvl) {
-                                    showToast('⛔ لا يمكنك ترقية عضو لرتبة مساوية أو أعلى من رتبتك!', 'error');
-                                    return;
+                              openPromptDialog(
+                                'تغيير الرتبة',
+                                `اختر معرف الرتبة الجديدة لـ [${m.username}]:\n${roleListStr}`,
+                                m.role,
+                                (r) => {
+                                  if (r && r.trim()) {
+                                    const clean = r.trim().toLowerCase();
+                                    const found = rolesConfig.find((x) => x.id.toLowerCase() === clean);
+                                    if (found || ['hassan', 'admin', 'super', 'member', 'guest'].includes(clean)) {
+                                      if (!isSupremeHassan && getRoleLevel(clean) >= actorLvl) {
+                                        showToast('⛔ لا يمكنك ترقية عضو لرتبة مساوية أو أعلى من رتبتك!', 'error');
+                                        return;
+                                      }
+                                      onAdminAction('updateRole', m.username, clean);
+                                      showToast(`تمت ترقية رتبة [${m.username}] إلى ${found?.name || clean}`, 'success');
+                                    } else {
+                                      showToast('الرتبة غير موجودة، يرجى كتابة معرف صحيح من القائمة', 'error');
+                                    }
                                   }
-                                  onAdminAction('updateRole', m.username, clean);
-                                  showToast(`تمت ترقية رتبة [${m.username}] إلى ${found?.name || clean}`, 'success');
-                                } else {
-                                  showToast('الرتبة غير موجودة، يرجى كتابة معرف صحيح من القائمة', 'error');
                                 }
-                              }
+                              );
                             }}
                             className="px-2 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-emerald-300 border border-slate-600 flex items-center gap-1 cursor-pointer"
                             title="ترقية أو تغيير الرتبة"
@@ -1539,11 +1578,19 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              const pts = prompt(`أدخل رصيد النقاط الجديد لـ [${m.username}]:`, String(m.points || 0));
-                              if (pts !== null && !isNaN(Number(pts))) {
-                                onAdminAction('updatePoints', m.username, Number(pts));
-                                showToast(`تم تعديل نقاط [${m.username}] إلى ${pts}`, 'success');
-                              }
+                              openPromptDialog(
+                                'تعديل النقاط',
+                                `أدخل رصيد النقاط الجديد لـ [${m.username}]:`,
+                                String(m.points || 0),
+                                (pts) => {
+                                  if (pts.trim() !== '' && !isNaN(Number(pts))) {
+                                    onAdminAction('updatePoints', m.username, Number(pts));
+                                    showToast(`تم تعديل نقاط [${m.username}] إلى ${pts}`, 'success');
+                                  }
+                                },
+                                '0',
+                                'number'
+                              );
                             }}
                             className="px-2 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-amber-300 border border-slate-600 flex items-center gap-1 cursor-pointer"
                             title="تعديل رصيد النقاط"
@@ -1557,11 +1604,19 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              const lks = prompt(`أدخل عدد اللايكات الجديد لـ [${m.username}]:`, String(m.likes || 0));
-                              if (lks !== null && !isNaN(Number(lks))) {
-                                onAdminAction('updateLikes', m.username, Number(lks));
-                                showToast(`تم تعديل لايكات [${m.username}] إلى ${lks}`, 'success');
-                              }
+                              openPromptDialog(
+                                'تعديل اللايكات',
+                                `أدخل عدد اللايكات الجديد لـ [${m.username}]:`,
+                                String(m.likes || 0),
+                                (lks) => {
+                                  if (lks.trim() !== '' && !isNaN(Number(lks))) {
+                                    onAdminAction('updateLikes', m.username, Number(lks));
+                                    showToast(`تم تعديل لايكات [${m.username}] إلى ${lks}`, 'success');
+                                  }
+                                },
+                                '0',
+                                'number'
+                              );
                             }}
                             className="px-2 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-rose-300 border border-slate-600 flex items-center gap-1 cursor-pointer"
                             title="تعديل اللايكات"
@@ -1575,11 +1630,17 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
                         <button
                           type="button"
                           onClick={() => {
-                            const newN = prompt(`أدخل الاسم أو الزخرفة الجديدة لـ [${m.username}]:`, m.username);
-                            if (newN && newN.trim() && newN.trim() !== m.username) {
-                              onAdminAction('updateUsername', m.username, newN.trim());
-                              showToast(`تم تعديل اسم العضوية إلى [${newN.trim()}]`, 'success');
-                            }
+                            openPromptDialog(
+                              'تعديل الاسم والزخرفة',
+                              `أدخل الاسم أو الزخرفة الجديدة لـ [${m.username}]:`,
+                              m.username,
+                              (newN) => {
+                                if (newN && newN.trim() && newN.trim() !== m.username) {
+                                  onAdminAction('updateUsername', m.username, newN.trim());
+                                  showToast(`تم تعديل اسم العضوية إلى [${newN.trim()}]`, 'success');
+                                }
+                              }
+                            );
                           }}
                           className="px-2 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 border border-slate-600 flex items-center gap-1 cursor-pointer"
                           title="تعديل الاسم والزخرفة في قاعدة البيانات"
@@ -1592,13 +1653,18 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
                         <button
                           type="button"
                           onClick={() => {
-                            const bUrl = prompt(`أدخل رابط البنر المصور 500x50 لـ [${m.username}] (أو اتركه فارغاً لإلغاء البنر):`, m.nameBannerUrl || '');
-                            if (bUrl !== null) {
-                              if (onAssignMemberBanner) {
-                                onAssignMemberBanner(m.username, bUrl.trim());
-                              }
-                              showToast(bUrl.trim() ? `تم حفظ بنر الاسم لـ [${m.username}] 🖼️` : `تم حذف بنر [${m.username}]`, 'success');
-                            }
+                            openPromptDialog(
+                              'تعديل بنر الاسم',
+                              `أدخل رابط البنر المصور 500x50 لـ [${m.username}] (أو اتركه فارغاً لإلغاء البنر):`,
+                              m.nameBannerUrl || '',
+                              (bUrl) => {
+                                if (onAssignMemberBanner) {
+                                  onAssignMemberBanner(m.username, bUrl.trim());
+                                }
+                                showToast(bUrl.trim() ? `تم حفظ بنر الاسم لـ [${m.username}] 🖼️` : `تم حذف بنر [${m.username}]`, 'success');
+                              },
+                              'https://...'
+                            );
                           }}
                           className="px-2 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-amber-300 border border-slate-600 flex items-center gap-1 cursor-pointer"
                           title="تحديد أو تغيير بنر الاسم المصور 500x50 لهذا العضو"
@@ -1612,13 +1678,21 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              const newPass = prompt(`أدخل كلمة المرور الجديدة للعضو [${m.username}] عند النسيان:`, '123456');
-                              if (newPass && newPass.trim().length >= 3) {
-                                onAdminAction('updatePassword', m.username, newPass.trim());
-                                showToast(`تم تعيين كلمة مرور جديدة للعضو [${m.username}] بنجاح 🔑`, 'success');
-                              } else if (newPass !== null) {
-                                showToast('يجب أن تتكون كلمة المرور من 3 خانات على الأقل', 'error');
-                              }
+                              openPromptDialog(
+                                'تغيير كلمة المرور',
+                                `أدخل كلمة المرور الجديدة للعضو [${m.username}] عند النسيان:`,
+                                '',
+                                (newPass) => {
+                                  if (newPass && newPass.trim().length >= 3) {
+                                    onAdminAction('updatePassword', m.username, newPass.trim());
+                                    showToast(`تم تعيين كلمة مرور جديدة للعضو [${m.username}] بنجاح 🔑`, 'success');
+                                  } else {
+                                    showToast('يجب أن تتكون كلمة المرور من 3 خانات على الأقل', 'error');
+                                  }
+                                },
+                                'كلمة مرور جديدة (3 أحرف فأكثر)',
+                                'password'
+                              );
                             }}
                             className="px-2 py-1 rounded-lg bg-amber-600/30 hover:bg-amber-600/50 text-amber-300 border border-amber-500/40 flex items-center gap-1 cursor-pointer"
                             title="تغيير كلمة المرور للعضو عند نسيانها"
@@ -1632,11 +1706,15 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
                         <button
                           type="button"
                           onClick={() => {
-                            const b = prompt(`أدخل الوسام أو اللقب الشرفي لـ [${m.username}] (اتركه فارغاً للإزالة):`, m.honorBadge || '👑 صقر ذهبي');
-                            if (b !== null) {
-                              onAdminAction('assignHonorBadge', m.username, b.trim() || undefined);
-                              showToast(`تم تحديث الوسام الشرفي لـ [${m.username}]`, 'success');
-                            }
+                            openPromptDialog(
+                              'وسام شرفي',
+                              `أدخل الوسام أو اللقب الشرفي لـ [${m.username}] (اتركه فارغاً للإزالة):`,
+                              m.honorBadge || '👑 صقر ذهبي',
+                              (b) => {
+                                onAdminAction('assignHonorBadge', m.username, b.trim() || undefined);
+                                showToast(`تم تحديث الوسام الشرفي لـ [${m.username}]`, 'success');
+                              }
+                            );
                           }}
                           className="px-2 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-amber-300 border border-slate-600 flex items-center gap-1 cursor-pointer"
                           title="منح أو تعديل وسام شرفي"
@@ -1667,10 +1745,14 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              if (confirm(`هل أنت متأكد من حذف عضوية [${m.username}] نهائياً من قاعدة البيانات؟`)) {
-                                onAdminAction('deleteAccount', m.username);
-                                showToast(`تم حذف عضوية [${m.username}] نهائياً`, 'info');
-                              }
+                              openConfirmDialog(
+                                'حذف العضوية نهائياً',
+                                `هل أنت متأكد من حذف عضوية [${m.username}] نهائياً من قاعدة البيانات؟`,
+                                () => {
+                                  onAdminAction('deleteAccount', m.username);
+                                  showToast(`تم حذف عضوية [${m.username}] نهائياً`, 'info');
+                                }
+                              );
                             }}
                             className="px-2 py-1 rounded-lg bg-rose-950 hover:bg-rose-900 text-rose-300 border border-rose-800 flex items-center gap-1 cursor-pointer"
                             title="حذف الحساب نهائياً من قاعدة البيانات"
@@ -1873,13 +1955,18 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              const bUrl = prompt(`أدخل رابط البنر المصور 500x50 لـ [${user.username}] (أو اتركه فارغاً لإلغاء البنر):`, user.nameBannerUrl || '');
-                              if (bUrl !== null) {
-                                if (onAssignMemberBanner) {
-                                  onAssignMemberBanner(user.username, bUrl.trim());
-                                }
-                                showToast(bUrl.trim() ? `تم حفظ بنر الاسم لـ [${user.username}] 🖼️` : `تم حذف بنر [${user.username}]`, 'success');
-                              }
+                              openPromptDialog(
+                                'تعديل بنر الاسم',
+                                `أدخل رابط البنر المصور 500x50 لـ [${user.username}] (أو اتركه فارغاً لإلغاء البنر):`,
+                                user.nameBannerUrl || '',
+                                (bUrl) => {
+                                  if (onAssignMemberBanner) {
+                                    onAssignMemberBanner(user.username, bUrl.trim());
+                                  }
+                                  showToast(bUrl.trim() ? `تم حفظ بنر الاسم لـ [${user.username}] 🖼️` : `تم حذف بنر [${user.username}]`, 'success');
+                                },
+                                'https://...'
+                              );
                             }}
                             className="px-2 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-amber-300 border border-slate-600 flex items-center gap-1 transition-colors cursor-pointer"
                             title="تحديد أو تغيير بنر الاسم المصور 500x50 لهذا العضو"
@@ -1923,13 +2010,21 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
                             <button
                               type="button"
                               onClick={() => {
-                                const newPass = prompt(`أدخل كلمة المرور الجديدة للعضو [${user.username}] عند النسيان:`, '123456');
-                                if (newPass && newPass.trim().length >= 3) {
-                                  onAdminAction('updatePassword', user.username, newPass.trim());
-                                  showToast(`تم تعيين كلمة مرور جديدة للعضو [${user.username}] بنجاح 🔑`, 'success');
-                                } else if (newPass !== null) {
-                                  showToast('يجب أن تتكون كلمة المرور من 3 خانات على الأقل', 'error');
-                                }
+                                openPromptDialog(
+                                  'تغيير كلمة المرور',
+                                  `أدخل كلمة المرور الجديدة للعضو [${user.username}] عند النسيان:`,
+                                  '',
+                                  (newPass) => {
+                                    if (newPass && newPass.trim().length >= 3) {
+                                      onAdminAction('updatePassword', user.username, newPass.trim());
+                                      showToast(`تم تعيين كلمة مرور جديدة للعضو [${user.username}] بنجاح 🔑`, 'success');
+                                    } else {
+                                      showToast('يجب أن تتكون كلمة المرور من 3 خانات على الأقل', 'error');
+                                    }
+                                  },
+                                  'كلمة مرور جديدة (3 أحرف فأكثر)',
+                                  'password'
+                                );
                               }}
                               className="px-2 py-1 rounded-lg bg-amber-600/30 hover:bg-amber-600/50 text-amber-300 border border-amber-500/40 flex items-center gap-1 transition-colors cursor-pointer"
                               title="تغيير كلمة المرور للعضو عند نسيانها"
@@ -1956,9 +2051,13 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
                           {user.avatarUrl && (
                             <button
                               onClick={() => {
-                                if (confirm(`هل أنت متأكد من حذف صورة ${user.username} المخالفة؟`)) {
-                                  onAdminAction('deleteAvatar', user.username);
-                                }
+                                openConfirmDialog(
+                                  'حذف الصورة الشخصية',
+                                  `هل أنت متأكد من حذف صورة ${user.username} المخالفة؟`,
+                                  () => {
+                                    onAdminAction('deleteAvatar', user.username);
+                                  }
+                                );
                               }}
                               className="px-2 py-1 rounded-lg bg-slate-700 hover:bg-rose-900/60 text-rose-300 border border-slate-600 flex items-center gap-1 transition-colors cursor-pointer"
                               title="حذف الصورة المخالفة"
@@ -2138,9 +2237,13 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
             <button
               type="button"
               onClick={() => {
-                if (confirm('هل أنت متأكد من مسح شات الغرفة كاملاً لجميع المتواجدين؟')) {
-                  onAdminAction('globalClearChat', '');
-                }
+                openConfirmDialog(
+                  'مسح شات الغرفة',
+                  'هل أنت متأكد من مسح شات الغرفة كاملاً لجميع المتواجدين؟',
+                  () => {
+                    onAdminAction('globalClearChat', '');
+                  }
+                );
               }}
               className="p-3 bg-red-950/50 hover:bg-red-900/60 text-red-200 border border-red-700/60 rounded-xl flex items-center justify-center gap-2 font-bold cursor-pointer transition-colors shadow-xs"
             >
@@ -2151,9 +2254,13 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
             <button
               type="button"
               onClick={() => {
-                if (confirm(`هل أنت متأكد من سحب جميع الأعضاء المتواجدين بالسيرفر إلى [${currentUser.room}]؟`)) {
-                  onAdminAction('pullAllUsers', '');
-                }
+                openConfirmDialog(
+                  'سحب جميع الأعضاء',
+                  `هل أنت متأكد من سحب جميع الأعضاء المتواجدين بالسيرفر إلى [${currentUser.room}]؟`,
+                  () => {
+                    onAdminAction('pullAllUsers', '');
+                  }
+                );
               }}
               className="p-3 bg-amber-950/50 hover:bg-amber-900/60 text-amber-200 border border-amber-700/60 rounded-xl flex items-center justify-center gap-2 font-bold cursor-pointer transition-colors shadow-xs"
             >
@@ -2321,9 +2428,13 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
                       {(isSupremeHassan || currentUser.role === 'admin' || getRoleLevel(currentUser.role) >= 100) && !isProtectedCore && (
                         <button
                           onClick={() => {
-                            if (confirm(`هل أنت متأكد من حذف الغرفة [${room.name}]؟ سيتم نقل روادها إلى الغرفة العامة.`)) {
-                              onAdminAction('deleteRoom', undefined, room.id);
-                            }
+                            openConfirmDialog(
+                              'حذف الغرفة',
+                              `هل أنت متأكد من حذف الغرفة [${room.name}]؟ سيتم نقل روادها إلى الغرفة العامة.`,
+                              () => {
+                                onAdminAction('deleteRoom', undefined, room.id);
+                              }
+                            );
                           }}
                           className="p-1 rounded bg-slate-800 hover:bg-red-900/60 text-red-400 cursor-pointer"
                           title="حذف الغرفة"
@@ -2614,9 +2725,13 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
             />
             <button
               onClick={() => {
-                if (confirm('هل أنت متأكد من إطلاق صافرة الإنذار لجميع المتواجدين؟')) {
-                  onAdminAction('adminSiren', undefined, sirenTextInput);
-                }
+                openConfirmDialog(
+                  'إطلاق صافرة الإنذار',
+                  'هل أنت متأكد من إطلاق صافرة الإنذار لجميع المتواجدين؟',
+                  () => {
+                    onAdminAction('adminSiren', undefined, sirenTextInput);
+                  }
+                );
               }}
               className="w-full py-2.5 rounded-xl bg-gradient-to-r from-red-600 via-rose-600 to-red-600 hover:from-red-700 hover:to-rose-700 text-white font-black text-xs flex items-center justify-center gap-1.5 cursor-pointer shadow-md"
             >
@@ -3055,9 +3170,13 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
                     <button
                       type="button"
                       onClick={() => {
-                        if (confirm(`هل أنت متأكد من فك الحظر عن [${item.username}]؟`)) {
-                          onAdminAction('unban', item.username);
-                        }
+                        openConfirmDialog(
+                          'فك الحظر',
+                          `هل أنت متأكد من فك الحظر عن [${item.username}]؟`,
+                          () => {
+                            onAdminAction('unban', item.username);
+                          }
+                        );
                       }}
                       className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[10px] transition-colors cursor-pointer whitespace-nowrap shadow-xs"
                     >
@@ -3356,9 +3475,13 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
                 {filterAlerts.length > 0 && onClearFilterAlerts && (
                   <button
                     onClick={() => {
-                      if (confirm('تفريغ سجل تنبيهات الفلتر بالكامل؟')) {
-                        onClearFilterAlerts();
-                      }
+                      openConfirmDialog(
+                        'تفريغ تنبيهات الفلتر',
+                        'تفريغ سجل تنبيهات الفلتر بالكامل؟',
+                        () => {
+                          onClearFilterAlerts();
+                        }
+                      );
                     }}
                     className="px-2 py-1 bg-red-900/80 hover:bg-red-800 text-white rounded text-[10px] font-bold flex items-center gap-1 cursor-pointer"
                   >
@@ -3763,12 +3886,16 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
                             <button
                               type="button"
                               onClick={() => {
-                                if (confirm(`هل أنت متأكد من حذف الاختصار [${sc.trigger}]؟`)) {
-                                  if (onDeleteShortcut) {
-                                    onDeleteShortcut(sc.id);
-                                    showToast(`تم حذف الاختصار [${sc.trigger}]`, 'info');
+                                openConfirmDialog(
+                                  'حذف الاختصار',
+                                  `هل أنت متأكد من حذف الاختصار [${sc.trigger}]؟`,
+                                  () => {
+                                    if (onDeleteShortcut) {
+                                      onDeleteShortcut(sc.id);
+                                      showToast(`تم حذف الاختصار [${sc.trigger}]`, 'info');
+                                    }
                                   }
-                                }
+                                );
                               }}
                               className="p-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900 text-rose-300 text-xs transition-colors cursor-pointer"
                               title="حذف هذا الاختصار"
@@ -3971,9 +4098,13 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
             {(currentUser.role === 'admin' || currentUser.role === 'super') && (
               <button
                 onClick={() => {
-                  if (confirm('تنبيه هام: هل أنت متأكد من رغبتك في حذف السجل الإداري ومسح جميع الأحداث والنشاطات نهائياً من قاعدة البيانات؟')) {
-                    onClearMonitorLogs();
-                  }
+                  openConfirmDialog(
+                    'حذف السجل الإداري',
+                    'تنبيه هام: هل أنت متأكد من رغبتك في حذف السجل الإداري ومسح جميع الأحداث والنشاطات نهائياً من قاعدة البيانات؟',
+                    () => {
+                      onClearMonitorLogs();
+                    }
+                  );
                 }}
                 className="px-3 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white border border-red-500 text-[11px] font-black flex items-center gap-1.5 cursor-pointer whitespace-nowrap shadow-md active:scale-95 transition-all"
                 title="حذف السجل الإداري بالكامل من قاعدة البيانات"
@@ -4315,13 +4446,17 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
                                 type="button"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  if (confirm(`هل أنت متأكد من حذف الرتبة [${r.name}]؟`)) {
-                                    if (onDeleteRole) {
-                                      onDeleteRole(r.id);
-                                      setSelectedRoleForPerms('super');
-                                      showToast(`تم حذف الرتبة بنجاح`, 'info');
+                                  openConfirmDialog(
+                                    'حذف الرتبة',
+                                    `هل أنت متأكد من حذف الرتبة [${r.name}]؟`,
+                                    () => {
+                                      if (onDeleteRole) {
+                                        onDeleteRole(r.id);
+                                        setSelectedRoleForPerms('super');
+                                        showToast(`تم حذف الرتبة بنجاح`, 'info');
+                                      }
                                     }
-                                  }
+                                  );
                                 }}
                                 title="حذف الرتبة المخصصة"
                                 className="p-1 hover:bg-rose-700/60 rounded text-rose-200 hover:text-white cursor-pointer"
@@ -5672,13 +5807,20 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
                             <button
                               type="button"
                               onClick={() => {
-                                const target = prompt(`أدخل اسم العضو المراد إسناد بنر [${banner.title}] له:`);
-                                if (target && target.trim()) {
-                                  if (onAssignMemberBanner) {
-                                    onAssignMemberBanner(target.trim(), banner.imageUrl);
-                                  }
-                                  showToast(`تم إسناد البنر بنجاح للعضو [${target.trim()}] 🎯`, 'success');
-                                }
+                                openPromptDialog(
+                                  'إسناد بنر لعضو',
+                                  `أدخل اسم العضو المراد إسناد بنر [${banner.title}] له:`,
+                                  '',
+                                  (target) => {
+                                    if (target && target.trim()) {
+                                      if (onAssignMemberBanner) {
+                                        onAssignMemberBanner(target.trim(), banner.imageUrl);
+                                      }
+                                      showToast(`تم إسناد البنر بنجاح للعضو [${target.trim()}] 🎯`, 'success');
+                                    }
+                                  },
+                                  'اسم العضو'
+                                );
                               }}
                               className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer shadow-xs"
                               title="إسناد هذا البنر لعضو محدد فوراً"
@@ -7696,6 +7838,72 @@ export const AdminControlSuite: React.FC<AdminControlSuiteProps> = ({
                 <Check className="w-4 h-4" />
                 <span>حفظ وتطبيق إعدادات الأمان المتقدمة فورياً 💾</span>
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {adminDialog && (
+        <div
+          className="fixed inset-0 z-[10060] bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setAdminDialog(null)}
+        >
+          <div
+            className="w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl overflow-hidden text-right"
+            dir="rtl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-3 bg-slate-950 border-b border-slate-800 flex items-center justify-between">
+              <h4 className="font-black text-sm text-white">{adminDialog.title}</h4>
+              <button
+                type="button"
+                onClick={() => setAdminDialog(null)}
+                className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <p className="text-xs text-slate-200 whitespace-pre-line leading-relaxed">{adminDialog.message}</p>
+              {adminDialog.type === 'prompt' && (
+                <input
+                  type={adminDialog.inputType || 'text'}
+                  value={adminDialogInput}
+                  onChange={(e) => setAdminDialogInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      const val = adminDialogInput;
+                      const cb = adminDialog.onConfirm;
+                      setAdminDialog(null);
+                      cb(val);
+                    }
+                  }}
+                  placeholder={adminDialog.placeholder || ''}
+                  autoFocus
+                  className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white text-xs outline-none focus:border-amber-500"
+                />
+              )}
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setAdminDialog(null)}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const val = adminDialogInput;
+                    const cb = adminDialog.onConfirm;
+                    setAdminDialog(null);
+                    cb(val);
+                  }}
+                  className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-black cursor-pointer"
+                >
+                  تأكيد
+                </button>
+              </div>
             </div>
           </div>
         </div>

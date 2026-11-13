@@ -398,6 +398,23 @@ class ModalErrorBoundary extends React.Component<ModalErrorBoundaryProps, ModalE
   }
 }
 
+const SelfDestructCountdown: React.FC<{ targetAt: number }> = ({ targetAt }) => {
+  const [secondsLeft, setSecondsLeft] = useState<number>(() =>
+    Math.max(0, Math.ceil((targetAt - Date.now()) / 1000))
+  );
+
+  useEffect(() => {
+    const update = () => {
+      setSecondsLeft(Math.max(0, Math.ceil((targetAt - Date.now()) / 1000)));
+    };
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, [targetAt]);
+
+  return <span className="font-bold text-amber-300">{secondsLeft}ث</span>;
+};
+
 export default function App() {
   // Socket & Connection
   const [socket, setSocket] = useState<Socket | null>(null);
@@ -418,7 +435,7 @@ export default function App() {
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [uploadStatusText, setUploadStatusText] = useState<string>('');
 
-  // Login Screen State: Default to member login tab, with auto-fill from last session credentials
+  // Login Screen State: Default to member login tab, with auto-fill from last username only
   const [activeTab, setActiveTab] = useState<'visitor' | 'member' | 'register'>('member');
   const [usernameInput, setUsernameInput] = useState<string>(() => {
     if (typeof window !== 'undefined') {
@@ -426,12 +443,7 @@ export default function App() {
     }
     return '';
   });
-  const [passwordInput, setPasswordInput] = useState<string>(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('soqoor_last_member_password') || '';
-    }
-    return '';
-  });
+  const [passwordInput, setPasswordInput] = useState<string>('');
   const [showPassword, setShowPassword] = useState(false);
   const [detectedFlag, setDetectedFlag] = useState<string>('🇾🇪');
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -714,6 +726,10 @@ export default function App() {
     { slotNumber: 5, user: null }
   ]);
   const [isSpeakerMuted, setIsSpeakerMuted] = useState(false);
+  const isSpeakerMutedRef = useRef<boolean>(false);
+  useEffect(() => {
+    isSpeakerMutedRef.current = isSpeakerMuted;
+  }, [isSpeakerMuted]);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showMediaPicker, setShowMediaPicker] = useState(false);
   const [showPlusMenu, setShowPlusMenu] = useState(false);
@@ -815,6 +831,10 @@ export default function App() {
 
   // Client Incognito / Private Browsing mode detection probe
   const [isIncognitoClient, setIsIncognitoClient] = useState<boolean>(false);
+  const isIncognitoClientRef = useRef<boolean>(false);
+  useEffect(() => {
+    isIncognitoClientRef.current = isIncognitoClient;
+  }, [isIncognitoClient]);
   useEffect(() => {
     detectIncognitoMode().then((isIncog) => {
       if (isIncog) setIsIncognitoClient(true);
@@ -1047,13 +1067,42 @@ export default function App() {
   const [pmSelfDestructSeconds, setPmSelfDestructSeconds] = useState<number>(0);
   const [showPmSelfDestructMenu, setShowPmSelfDestructMenu] = useState(false);
   const [showPmEncryptionModal, setShowPmEncryptionModal] = useState(false);
-  const [nowTimestamp, setNowTimestamp] = useState<number>(() => Date.now());
+  const [appDialog, setAppDialog] = useState<{
+    type: 'confirm' | 'prompt';
+    title: string;
+    message: string;
+    placeholder?: string;
+    defaultValue?: string;
+    inputType?: string;
+    onConfirm: (val: string) => void;
+  } | null>(null);
+  const [appDialogInput, setAppDialogInput] = useState('');
+  const openAppConfirm = (title: string, message: string, onConfirm: () => void) => {
+    setAppDialogInput('');
+    setAppDialog({ type: 'confirm', title, message, onConfirm: () => onConfirm() });
+  };
+  const openAppPrompt = (
+    title: string,
+    message: string,
+    defaultValue: string,
+    onConfirm: (val: string) => void,
+    placeholder?: string,
+    inputType = 'text'
+  ) => {
+    setAppDialogInput(defaultValue);
+    setAppDialog({ type: 'prompt', title, message, defaultValue, placeholder, inputType, onConfirm });
+  };
 
-  // Real-time ticking for self-destruct messages countdown and automatic client expiration
+  const hasSelfDestructPm = useMemo(
+    () => privateMessages.some((pm) => Boolean(pm?.selfDestructAt)),
+    [privateMessages]
+  );
+
+  // Automatic client expiration for self-destruct messages (only runs interval when needed)
   useEffect(() => {
-    const timer = setInterval(() => {
+    if (!hasSelfDestructPm) return;
+    const timer = window.setInterval(() => {
       const now = Date.now();
-      setNowTimestamp(now);
       setPrivateMessages((prev) => {
         if (!Array.isArray(prev)) return [];
         const hasExpired = prev.some((pm) => pm && pm.selfDestructAt && pm.selfDestructAt <= now);
@@ -1061,8 +1110,8 @@ export default function App() {
         return prev.filter((pm) => !(pm && pm.selfDestructAt && pm.selfDestructAt <= now));
       });
     }, 1000);
-    return () => clearInterval(timer);
-  }, []);
+    return () => window.clearInterval(timer);
+  }, [hasSelfDestructPm]);
 
   // Mark incoming private messages as read when viewing PM conversation
   useEffect(() => {
@@ -1137,6 +1186,7 @@ export default function App() {
     partner: CallPartner;
     callType: 'audio' | 'video';
     isInitiator: boolean;
+    acceptedByPeer?: boolean;
   } | null>(null);
 
   // Coordinate Private Call audio focus with MediaSessionManager
@@ -1283,6 +1333,8 @@ export default function App() {
     isVoiceLocked: boolean;
     showDeletedNotice?: boolean;
     password: string;
+    isPasswordProtected?: boolean;
+    clearPassword?: boolean;
     wallpaper: string;
     welcomeMessage: string;
     welcomeEnabled: boolean;
@@ -1295,6 +1347,8 @@ export default function App() {
     isVoiceLocked: false,
     showDeletedNotice: false,
     password: '',
+    isPasswordProtected: false,
+    clearPassword: false,
     wallpaper: 'default',
     welcomeMessage: '',
     welcomeEnabled: true
@@ -1439,7 +1493,7 @@ export default function App() {
   });
   const [fontFamily, setFontFamily] = useState<string>(() => {
     try {
-      return localStorage.getItem('soqoor_font_family') || 'Cairo';
+      return localStorage.getItem('soqoor_font_family') || localStorage.getItem('soqoor_font') || 'Cairo';
     } catch {
       return 'Cairo';
     }
@@ -1487,9 +1541,21 @@ export default function App() {
   }, [activeCustomTheme, activeTheme, isNightMode]);
 
   useEffect(() => {
-    if (!activeCustomTheme) return;
-    const c = activeCustomTheme.colors;
     const root = document.documentElement.style;
+    const customVars = [
+      '--ct-app-bg', '--ct-app-text', '--ct-chat-bg', '--ct-header-bg',
+      '--ct-header-text', '--ct-header-border', '--ct-subheader-bg',
+      '--ct-subheader-text', '--ct-bottom-bg', '--ct-bottom-text',
+      '--ct-input-bg', '--ct-field-bg', '--ct-field-text', '--ct-field-border',
+      '--ct-bubble-bg', '--ct-bubble-border', '--ct-accent-text',
+      '--ct-btn-bg', '--ct-btn-text', '--ct-drawer-bg',
+      '--ct-card-bg', '--ct-card-border'
+    ];
+    if (!activeCustomTheme) {
+      customVars.forEach((v) => root.removeProperty(v));
+      return;
+    }
+    const c = activeCustomTheme.colors;
     root.setProperty('--ct-app-bg', c.appBg);
     root.setProperty('--ct-app-text', c.appText);
     root.setProperty('--ct-chat-bg', c.chatBg);
@@ -2676,46 +2742,49 @@ export default function App() {
 
   // Web Notifications Service Worker setup & incoming click dispatcher
   useEffect(() => {
-    if (isNotificationSupported()) {
-      registerNotificationServiceWorker().catch(() => {});
-      setNotificationPermission(getNotificationPermission());
+    if (!isNotificationSupported()) return;
+    registerNotificationServiceWorker().catch(() => {});
+    setNotificationPermission(getNotificationPermission());
 
-      listenToNotificationClicks((data) => {
-        if (data.type === 'pm' && data.fromUsername) {
-          const partner =
-            rosterUsers.find((u) => u.username.toLowerCase() === data.fromUsername?.toLowerCase()) ||
-            allConnectedUsers.find((u) => u.username.toLowerCase() === data.fromUsername?.toLowerCase()) || {
-              id: `notif-${data.fromUsername}`,
-              username: data.fromUsername,
-              room: 'الغرفة العامة',
-              avatarSeed: data.fromUsername,
-              statusQuote: '',
-              flag: '🇸🇦',
-              role: 'member',
-              likes: 0,
-              points: 0,
-              isVoice: false,
-              micSlot: null,
-              isMuted: false,
-              isTextMuted: false,
-              isSpeaking: false,
-              joinedAt: Date.now()
-            };
-          setSelectedPmUser(partner as any);
-          setActiveDrawer('pm');
-        } else if (data.type === 'mention') {
-          scrollToBottom(true);
-        }
-      });
-    }
-  }, [rosterUsers, allConnectedUsers]);
+    const unsubscribe = listenToNotificationClicks((data) => {
+      if (data.type === 'pm' && data.fromUsername) {
+        const partner =
+          rosterUsersRef.current.find((u) => u.username.toLowerCase() === data.fromUsername?.toLowerCase()) ||
+          allConnectedUsersRef.current.find((u) => u.username.toLowerCase() === data.fromUsername?.toLowerCase()) || {
+            id: `notif-${data.fromUsername}`,
+            username: data.fromUsername,
+            room: 'الغرفة العامة',
+            avatarSeed: data.fromUsername,
+            statusQuote: '',
+            flag: '🇸🇦',
+            role: 'member',
+            likes: 0,
+            points: 0,
+            isVoice: false,
+            micSlot: null,
+            isMuted: false,
+            isTextMuted: false,
+            isSpeaking: false,
+            joinedAt: Date.now()
+          };
+        setSelectedPmUser(partner as any);
+        setActiveDrawer('pm');
+      } else if (data.type === 'mention') {
+        scrollToBottom(true);
+      }
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, []);
 
   // Initialize Socket.io with infinite resilience and background keepalive
   useEffect(() => {
-    // Clean up bulky legacy localStorage keys to ensure browser memory stays ultra-lean
+    // Clean up bulky or sensitive legacy localStorage keys
     try {
       localStorage.removeItem('soqoor_current_user');
       localStorage.removeItem('soqoor_role_permissions');
+      localStorage.removeItem('soqoor_last_member_password');
     } catch {}
 
     // Connect to custom backend URL (e.g. Railway when hosted on Vercel) or current origin (when hosted on Railway)
@@ -2768,7 +2837,7 @@ export default function App() {
           username: savedUsername,
           room: currentUserRef.current?.room || 'الغرفة العامة',
           deviceFingerprint: generateDeviceFingerprint().fingerprintId,
-          isIncognito: isIncognitoClient,
+          isIncognito: isIncognitoClientRef.current,
           presenceState: typeof document !== 'undefined' && document.hidden ? 'away' : 'online'
         });
       }
@@ -3161,6 +3230,7 @@ export default function App() {
       if (data.fontFamily) {
         setFontFamily(data.fontFamily);
         localStorage.setItem('soqoor_font', data.fontFamily);
+        localStorage.setItem('soqoor_font_family', data.fontFamily);
       }
       if (data.fontWeight) {
         setChatFontWeight(data.fontWeight);
@@ -3307,7 +3377,7 @@ export default function App() {
         try {
           new Notification(`🎁 هدية جديدة من ${data.fromUsername}!`, {
             body: `أهداك [${data.giftTitle}]: ${data.giftMessage || 'مع أطيب التحيات وخالص التقدير 🌹'}`,
-            icon: data.giftUrl || '/icon-192.png'
+            icon: data.giftUrl || '/favicon.svg'
           });
         } catch (e) {}
       }
@@ -3335,7 +3405,7 @@ export default function App() {
       if (!alert) return;
       setFilterAlertsList((prev) => [alert, ...prev.filter((a) => a.id !== alert.id)].slice(0, 150));
       const currentU = currentUserRef.current;
-      if (currentU?.role === 'admin' || currentU?.role === 'super') {
+      if (currentU && (currentU.role === 'hassan' || currentU.role === 'admin' || currentU.role === 'super' || getRoleLevel(currentU.role) >= 75)) {
         sounds.playGeneralAlertPing();
         const matched = Array.isArray(alert.matchedWords) ? alert.matchedWords.join(', ') : alert.matchedWords || '';
         showToast(`🚨 تنبيه فلتر: كتب [${alert.username}] كلمة محظورة${matched ? `: "${matched}"` : ''}`, 'error');
@@ -3411,7 +3481,7 @@ export default function App() {
       presenceState: state,
       currentRoom: state === 'offline'
         ? 'خارج الغرف'
-        : allConnectedUsers.find((user) => user.username.toLowerCase() === username.toLowerCase())?.room || member.currentRoom
+        : allConnectedUsersRef.current.find((user) => user.username.toLowerCase() === username.toLowerCase())?.room || member.currentRoom
     }
   : member
   ));
@@ -3571,7 +3641,7 @@ export default function App() {
 
     s.on('chatMessageDeleted', ({ messageId, showNotice, deletedBy, deletedByRole }: { messageId: string; showNotice?: boolean; deletedBy?: string; deletedByRole?: string }) => {
       const role = currentUserRef.current?.role;
-      const isAdminUser = role === 'admin' || role === 'super';
+      const isAdminUser = role === 'hassan' || role === 'admin' || role === 'super' || getRoleLevel(role) >= 75;
       if (showNotice && isAdminUser) {
         setMessages((prev) =>
           prev.map((m) =>
@@ -3629,7 +3699,7 @@ export default function App() {
     });
 
     s.on('remoteVoiceChunk', (data: { userId: string; username: string; micSlot: number; chunk: string }) => {
-      if (isSpeakerMuted) return;
+      if (isSpeakerMutedRef.current) return;
       if (audioManagerRef.current?.hasConnectedPeer(data.userId)) {
         // Direct WebRTC peer connection is active and streaming track; skip fallback chunk to prevent echo
         return;
@@ -3710,9 +3780,6 @@ export default function App() {
       if (user.role !== 'guest') {
         try {
           localStorage.setItem('soqoor_last_member_username', user.username);
-          if (passwordInput) {
-            localStorage.setItem('soqoor_last_member_password', passwordInput);
-          }
         } catch {}
       }
       requestScreenWakeLock();
@@ -4184,8 +4251,17 @@ export default function App() {
       sounds.playGeneralAlertPing();
     });
 
-    s.on('pmCallAccepted', ({ callId }: { callId: string }) => {
-      setActiveCall((prev) => (prev ? { ...prev, callId } : null));
+    s.on('pmCallAccepted', ({ callId, responderId }: { callId: string; responderId?: string }) => {
+      setActiveCall((prev) =>
+        prev
+          ? {
+              ...prev,
+              callId,
+              acceptedByPeer: true,
+              partner: responderId ? { ...prev.partner, id: responderId } : prev.partner
+            }
+          : null
+      );
       showToast('تم قبول المكالمة الخاصة 🟢', 'success');
     });
 
@@ -4361,9 +4437,6 @@ export default function App() {
     if (activeTab === 'member' || activeTab === 'register') {
       try {
         localStorage.setItem('soqoor_last_member_username', usernameInput.trim());
-        if (passwordInput) {
-          localStorage.setItem('soqoor_last_member_password', passwordInput);
-        }
       } catch {}
     }
 
@@ -4402,9 +4475,8 @@ export default function App() {
     setUnreadPerUser({});
     setActiveDrawer('none');
     const savedLastUser = localStorage.getItem('soqoor_last_member_username') || '';
-    const savedLastPass = localStorage.getItem('soqoor_last_member_password') || '';
     setUsernameInput(savedLastUser);
-    setPasswordInput(savedLastPass);
+    setPasswordInput('');
     setActiveTab('member');
     showToast('تم تسجيل الخروج بنجاح وإنهاء جلستك 🧹', 'info');
   };
@@ -4453,18 +4525,19 @@ export default function App() {
       showToast('يجب تسجيل الدخول للإبلاغ عن الرسائل', 'error');
       return;
     }
-    const confirmReport = window.confirm(
-      `هل ترغب في رفع بلاغ لإدارة الروم بخصوص رسالة @${msg.username}؟\nالمحتوى: "${msg.text ? msg.text.substring(0, 50) : 'مرفق وسائط'}"`
+    openAppConfirm(
+      'إبلاغ عن رسالة',
+      `هل ترغب في رفع بلاغ لإدارة الروم بخصوص رسالة @${msg.username}؟\nالمحتوى: "${msg.text ? msg.text.substring(0, 50) : 'مرفق وسائط'}"`,
+      () => {
+        socket?.emit('reportChatMessage', {
+          messageId: msg.id,
+          reportedUser: msg.username,
+          text: msg.text,
+          reason: 'مخالفة لقواعد وآداب الشات'
+        });
+        showToast(`تم رفع البلاغ بنجاح إلى إدارة الروم لمراجعة رسالة @${msg.username} 🚩`, 'success');
+      }
     );
-    if (!confirmReport) return;
-
-    socket?.emit('reportChatMessage', {
-      messageId: msg.id,
-      reportedUser: msg.username,
-      text: msg.text,
-      reason: 'مخالفة لقواعد وآداب الشات'
-    });
-    showToast(`تم رفع البلاغ بنجاح إلى إدارة الروم لمراجعة رسالة @${msg.username} 🚩`, 'success');
   };
 
   // Edit message in public room
@@ -4568,28 +4641,37 @@ export default function App() {
     showToast('تم إرسال ردك وتوضيحك للإدارة بنجاح ✉️', 'success');
   };
 
-  // Confirm password for protected room entry
+  // Confirm password for protected room entry (verified server-side)
   const handleConfirmRoomPassword = () => {
-    if (!passwordPromptRoom || !currentUser) return;
-    if (roomPasswordInput.trim() !== passwordPromptRoom.password) {
+    if (!passwordPromptRoom || !currentUser || !socket) return;
+    const trimmed = roomPasswordInput.trim();
+    if (!trimmed) {
       sounds.playError();
-      setRoomPasswordError('كلمة المرور غير صحيحة، يرجى إعادة المحاولة');
+      setRoomPasswordError('يرجى إدخال كلمة مرور الغرفة');
       return;
     }
-    sounds.playMemberJoin();
-    setMessages([]);
-    socket?.emit('joinRoom', {
-      username: currentUser.username,
-      room: passwordPromptRoom.id,
-      flag: currentUser.flag,
-      statusQuote: currentUser.statusQuote,
-      isGhost: currentUser.isGhost
+    socket.emit('verifyRoomPassword', { roomId: passwordPromptRoom.id, password: trimmed }, (res: { valid: boolean }) => {
+      if (!res?.valid) {
+        sounds.playError();
+        setRoomPasswordError('كلمة المرور غير صحيحة، يرجى إعادة المحاولة');
+        return;
+      }
+      sounds.playMemberJoin();
+      setMessages([]);
+      socket.emit('joinRoom', {
+        username: currentUser.username,
+        room: passwordPromptRoom.id,
+        roomPassword: trimmed,
+        flag: currentUser.flag,
+        statusQuote: currentUser.statusQuote,
+        isGhost: currentUser.isGhost
+      });
+      setPasswordPromptRoom(null);
+      setRoomPasswordInput('');
+      setRoomPasswordError(null);
+      setActiveDrawer('none');
+      showToast(`تم الدخول إلى [${passwordPromptRoom.name}] بنجاح 🚀`, 'success');
     });
-    setPasswordPromptRoom(null);
-    setRoomPasswordInput('');
-    setRoomPasswordError(null);
-    setActiveDrawer('none');
-    showToast(`تم الدخول إلى [${passwordPromptRoom.name}] بنجاح 🚀`, 'success');
   };
 
   // Direct media download helper
@@ -4607,7 +4689,13 @@ export default function App() {
       URL.revokeObjectURL(blobUrl);
       showToast('تم بدء تحميل الوسائط بنجاح ⬇️', 'success');
     } catch {
-      window.open(url, '_blank');
+      const link = document.createElement('a');
+      link.href = url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
     }
   };
 
@@ -4770,7 +4858,8 @@ export default function App() {
       callId: incomingCall.callId,
       partner: incomingCall.fromUser,
       callType: incomingCall.callType,
-      isInitiator: false
+      isInitiator: false,
+      acceptedByPeer: true
     });
     showToast(`تم قبول المكالمة المشفرة طرف-إلى-طرف (E2EE 🔒) مع ${incomingCall.fromUser.username}... 📞`, 'success');
     setIncomingCall(null);
@@ -4984,6 +5073,7 @@ export default function App() {
     try {
       localStorage.setItem('soqoor_theme', targetTheme);
       localStorage.setItem('soqoor_font', targetFont);
+      localStorage.setItem('soqoor_font_family', targetFont);
       localStorage.setItem('soqoor_chat_font_weight', targetWeight);
       localStorage.setItem('soqoor_wallpaper', targetWall);
       localStorage.setItem('soqoor_bubble_style', targetBubble);
@@ -5077,13 +5167,17 @@ export default function App() {
       } else {
         // If Admin/Super/Supreme clicks occupied mic: offer option to Pull Mic!
         if (currentUser.role === 'hassan' || currentUser.role === 'admin' || currentUser.role === 'super' || getRoleLevel(currentUser.role) >= 75) {
-          const confirmPull = confirm(`المايك مأخوذ من قبل [${currentSlot.user.username}]. هل تريد سحب المايك منه كإداري؟`);
-          if (confirmPull) {
-            socket.emit('adminAction', {
-              action: 'pullMic',
-              targetUsername: currentSlot.user.username
-            });
-          }
+          const occupiedUsername = currentSlot.user.username;
+          openAppConfirm(
+            'سحب المايك',
+            `المايك مأخوذ من قبل [${occupiedUsername}]. هل تريد سحب المايك منه كإداري؟`,
+            () => {
+              socket.emit('adminAction', {
+                action: 'pullMic',
+                targetUsername: occupiedUsername
+              });
+            }
+          );
         } else {
           showToast(`المايك رقم ${slotNumber} مأخوذ من قبل ${currentSlot.user.username}`, 'info');
         }
@@ -5851,9 +5945,7 @@ export default function App() {
               onClick={() => {
                 setActiveTab('member');
                 const lastUser = localStorage.getItem('soqoor_last_member_username') || '';
-                const lastPass = localStorage.getItem('soqoor_last_member_password') || '';
                 if (lastUser) setUsernameInput(lastUser);
-                if (lastPass) setPasswordInput(lastPass);
                 setLoginError(null);
               }}
               className={`py-3 flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
@@ -6896,9 +6988,7 @@ export default function App() {
                       <div className="mt-0.5 flex items-center gap-1 px-1.5 py-0.2 rounded bg-rose-950/80 border border-rose-500/40 text-rose-300 text-[9px] font-mono shadow-xs animate-pulse w-fit">
                         <Flame className="w-3 h-3 text-rose-400 animate-bounce" />
                         <span>تختفي خلال:</span>
-                        <span className="font-bold text-amber-300">
-                          {Math.max(0, Math.ceil((pm.selfDestructAt - nowTimestamp) / 1000))}ث
-                        </span>
+                        <SelfDestructCountdown targetAt={pm.selfDestructAt} />
                       </div>
                     )}
 
@@ -9276,6 +9366,8 @@ export default function App() {
                             isVoiceLocked: roomSettings?.isVoiceLocked || false,
                             showDeletedNotice: Boolean(roomSettings?.showDeletedNotice),
                             password: '',
+                            isPasswordProtected: Boolean(curRoom?.isPasswordProtected),
+                            clearPassword: false,
                             wallpaper: activeWallpaper || 'default',
                             welcomeMessage: (roomSettings as any)?.welcomeMessage || '',
                             welcomeEnabled: (roomSettings as any)?.welcomeEnabled !== false
@@ -9289,7 +9381,7 @@ export default function App() {
                       </button>
                     )}
 
-                    {(currentUser.role === 'admin' || currentUser.role === 'super' || hasUserPermission(currentUser, 'canAccessControlPanel') || hasUserPermission(currentUser, 'canLockRoom') || hasUserPermission(currentUser, 'canLockVoice') || hasUserPermission(currentUser, 'canClearRoomChat') || getRoleLevel(currentUser.role) > 50) && (
+                    {(currentUser.role === 'hassan' || currentUser.role === 'admin' || currentUser.role === 'super' || hasUserPermission(currentUser, 'canAccessControlPanel') || hasUserPermission(currentUser, 'canLockRoom') || hasUserPermission(currentUser, 'canLockVoice') || hasUserPermission(currentUser, 'canClearRoomChat') || getRoleLevel(currentUser.role) > 50) && (
                       <div className="p-2 rounded-xl bg-gradient-to-r from-red-950/60 via-slate-900 to-amber-950/60 border border-red-500/40 text-amber-200 space-y-1.5 shadow-md">
                         <div className="flex items-center justify-between">
                           <span className="px-1.5 py-0.5 rounded bg-red-600 text-white text-[9px] font-mono font-black">STAFF</span>
@@ -9300,9 +9392,13 @@ export default function App() {
                             type="button"
                             onClick={() => {
                               setShowCompactToolsMenu(false);
-                              if (confirm('مسح شات الغرفة كاملاً لجميع المتواجدين؟')) {
-                                handleAdminAction('globalClearChat', '');
-                              }
+                              openAppConfirm(
+                                'مسح شات الغرفة',
+                                'مسح شات الغرفة كاملاً لجميع المتواجدين؟',
+                                () => {
+                                  handleAdminAction('globalClearChat', '');
+                                }
+                              );
                             }}
                             className="px-2 py-1.5 rounded bg-red-950/80 hover:bg-red-900 text-red-200 border border-red-700/50 flex items-center justify-center gap-1 cursor-pointer font-bold"
                             title="مسح شات الغرفة"
@@ -12136,7 +12232,7 @@ export default function App() {
                         <span className="text-[11px] text-slate-400 font-mono" title={post.timestamp ? new Date(post.timestamp).toLocaleString('ar-EG') : undefined}>
                           {formatWallTime(post.timestamp, post.time, post.id)}
                         </span>
-                        {currentUser && (post.username.toLowerCase() === currentUser.username.toLowerCase() || currentUser.role === 'admin' || currentUser.role === 'super') && (
+                        {currentUser && (post.username.toLowerCase() === currentUser.username.toLowerCase() || currentUser.role === 'hassan' || currentUser.role === 'admin' || currentUser.role === 'super') && (
                           <div className="flex items-center gap-1.5">
                             <button
                               type="button"
@@ -12471,6 +12567,7 @@ export default function App() {
                                     {currentUser && (
                                       cm.username.toLowerCase() === currentUser.username.toLowerCase() ||
                                       post.username.toLowerCase() === currentUser.username.toLowerCase() ||
+                                      currentUser.role === 'hassan' ||
                                       currentUser.role === 'admin' ||
                                       currentUser.role === 'super'
                                     ) && (
@@ -13372,6 +13469,8 @@ export default function App() {
                           isVoiceLocked: roomSettings?.isVoiceLocked || false,
                           showDeletedNotice: Boolean(roomSettings?.showDeletedNotice),
                           password: '',
+                          isPasswordProtected: Boolean(curRoom?.isPasswordProtected),
+                          clearPassword: false,
                           wallpaper: activeWallpaper || 'default',
                           welcomeMessage: (roomSettings as any)?.welcomeMessage || '',
                           welcomeEnabled: (roomSettings as any)?.welcomeEnabled !== false
@@ -13981,12 +14080,22 @@ export default function App() {
               {/* Change Password Form (Screenshot 5: تغيير كلمة المرور) */}
               <button
                 onClick={() => {
-                  const newP = prompt('أدخل كلمة المرور الجديدة:');
-                  if (newP) {
-                    setSettingPassword(newP);
-                    socket?.emit('updateProfile', { password: newP });
-                    showToast('تم تغيير كلمة المرور بنجاح 🔒', 'success');
-                  }
+                  openAppPrompt(
+                    'تغيير كلمة المرور',
+                    'أدخل كلمة المرور الجديدة لحسابك (3 أحرف على الأقل):',
+                    '',
+                    (newP) => {
+                      if (newP && newP.trim().length >= 3) {
+                        setSettingPassword(newP.trim());
+                        socket?.emit('updateProfile', { password: newP.trim() });
+                        showToast('تم تغيير كلمة المرور بنجاح 🔒', 'success');
+                      } else if (newP.trim().length > 0) {
+                        showToast('يجب أن تتكون كلمة المرور من 3 أحرف على الأقل', 'error');
+                      }
+                    },
+                    'كلمة المرور الجديدة',
+                    'password'
+                  );
                 }}
                 className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold rounded border flex items-center justify-center gap-1.5"
               >
@@ -14250,7 +14359,7 @@ export default function App() {
                       <span className="text-indigo-700 font-black truncate">{profileTargetUser.room}</span>
                     </span>
                   )}
-                  <span className="text-indigo-600 font-mono shrink-0">1M نقطة</span>
+                  <span className="text-indigo-600 font-mono shrink-0">{(profileTargetUser.points ?? 0).toLocaleString('en-US')} نقطة</span>
                 </div>
               </div>
 
@@ -14560,8 +14669,16 @@ export default function App() {
                                 <button
                                   type="button"
                                   onClick={() => {
-                                    const r = prompt('سبب الطرد من الشات:');
-                                    if (r !== null) handleAdminAction('kick', profileTargetUser.username, undefined, r || 'مخالفة القوانين');
+                                    const targetName = profileTargetUser.username;
+                                    openAppPrompt(
+                                      'طرد من الشات',
+                                      `أدخل سبب طرد [${targetName}] من الشات:`,
+                                      '',
+                                      (r) => {
+                                        handleAdminAction('kick', targetName, undefined, r.trim() || 'مخالفة القوانين');
+                                      },
+                                      'سبب الطرد...'
+                                    );
                                   }}
                                   className="p-2 rounded-lg bg-rose-100 hover:bg-rose-200 border border-rose-300 text-rose-700 flex items-center justify-center gap-1 min-w-0 truncate"
                                 >
@@ -14572,8 +14689,19 @@ export default function App() {
                                 <button
                                   type="button"
                                   onClick={() => {
-                                    const mins = prompt('مدة الطرد المؤقت بالدقائق (مثال: 15):');
-                                    if (mins) handleAdminAction('kick', profileTargetUser.username, undefined, `طرد مؤقت ${mins} دقيقة`);
+                                    const targetName = profileTargetUser.username;
+                                    openAppPrompt(
+                                      'طرد مؤقت',
+                                      `مدة الطرد المؤقت بالدقائق للعضو [${targetName}] (مثال: 15):`,
+                                      '15',
+                                      (mins) => {
+                                        if (mins && mins.trim()) {
+                                          handleAdminAction('kick', targetName, undefined, `طرد مؤقت ${mins.trim()} دقيقة`);
+                                        }
+                                      },
+                                      '15',
+                                      'number'
+                                    );
                                   }}
                                   className="p-2 rounded-lg bg-slate-100 hover:bg-slate-200 border text-slate-800 flex items-center justify-center gap-1 min-w-0 truncate"
                                 >
@@ -14595,10 +14723,16 @@ export default function App() {
                               <button
                                 type="button"
                                 onClick={() => {
-                                  const reason = prompt('سبب سجن العضو وحجزه:');
-                                  if (reason !== null) {
-                                    handleAdminAction('jailUser', profileTargetUser.username, undefined, reason || 'سجن إداري');
-                                  }
+                                  const targetName = profileTargetUser.username;
+                                  openAppPrompt(
+                                    'سجن العضو',
+                                    `سبب سجن [${targetName}] وحجزه:`,
+                                    '',
+                                    (reason) => {
+                                      handleAdminAction('jailUser', targetName, undefined, reason.trim() || 'سجن إداري');
+                                    },
+                                    'سبب السجن...'
+                                  );
                                 }}
                                 className="p-2 rounded-lg bg-amber-900/10 hover:bg-amber-900/20 border border-amber-800/30 text-amber-950 flex items-center justify-center gap-1 font-bold cursor-pointer min-w-0 truncate"
                               >
@@ -14613,8 +14747,19 @@ export default function App() {
                                 <button
                                   type="button"
                                   onClick={() => {
-                                    const mins = prompt('مدة الباند المؤقت بالدقائق (مثال: 30):');
-                                    if (mins) handleAdminAction('kick', profileTargetUser.username, undefined, `باند مؤقت ${mins} دقيقة`);
+                                    const targetName = profileTargetUser.username;
+                                    openAppPrompt(
+                                      'باند مؤقت',
+                                      `مدة الباند المؤقت بالدقائق للعضو [${targetName}] (مثال: 30):`,
+                                      '30',
+                                      (mins) => {
+                                        if (mins && mins.trim()) {
+                                          handleAdminAction('kick', targetName, undefined, `باند مؤقت ${mins.trim()} دقيقة`);
+                                        }
+                                      },
+                                      '30',
+                                      'number'
+                                    );
                                   }}
                                   className="p-2 rounded-lg bg-slate-100 border text-slate-800 flex items-center justify-center gap-1 min-w-0 truncate"
                                 >
@@ -14624,9 +14769,14 @@ export default function App() {
                                 <button
                                   type="button"
                                   onClick={() => {
-                                    if (confirm(`هل أنت متأكد من فرض باند دائم على [${profileTargetUser.username}]؟`)) {
-                                      handleAdminAction('ban', profileTargetUser.username);
-                                    }
+                                    const targetName = profileTargetUser.username;
+                                    openAppConfirm(
+                                      'فرض باند دائم',
+                                      `هل أنت متأكد من فرض باند دائم على [${targetName}]؟`,
+                                      () => {
+                                        handleAdminAction('ban', targetName);
+                                      }
+                                    );
                                   }}
                                   className="p-2 rounded-lg bg-red-600 hover:bg-red-700 text-white font-bold flex items-center justify-center gap-1 min-w-0 truncate"
                                 >
@@ -15024,6 +15174,7 @@ export default function App() {
 
         {/* Private 1-on-1 Audio/Video Call Overlay (شاشة ومودال الاتصال الخاص) */}
         <PrivateCallOverlay
+          socket={socket}
           incomingCall={incomingCall}
           activeCall={activeCall}
           onAcceptIncoming={handleAcceptIncomingCall}
@@ -15323,6 +15474,7 @@ export default function App() {
                 onlineCount={onlineCount}
                 currentRoom={currentUser?.room || 'الغرفة العامة'}
                 socketConnected={isConnected}
+                pingLatency={pingLatency}
                 onShowToast={showToast}
               />
             </Suspense>
@@ -15563,18 +15715,49 @@ export default function App() {
                 </div>
 
                 {/* Password */}
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-amber-200">كلمة مرور الغرفة (اتركه فارغاً إن كانت عامة):</label>
+                <div className="space-y-1.5">
+                  <label className="text-[11px] font-bold text-amber-200 block">
+                    {currentRoomSettingsForm.isPasswordProtected
+                      ? 'تغيير كلمة مرور الغرفة (اتركه فارغاً للإبقاء على الكلمة الحالية):'
+                      : 'كلمة مرور الغرفة (اتركه فارغاً لغرفة مفتوحة للجميع):'}
+                  </label>
                   <input
                     type="password"
                     autoComplete="off"
                     data-form-type="other"
                     data-lpignore="true"
-                    placeholder="اتركه فارغاً لغرفة مفتوحة للجميع"
+                    placeholder={
+                      currentRoomSettingsForm.isPasswordProtected
+                        ? 'محمية حالياً — أدخل كلمة جديدة للتغيير فقط'
+                        : 'اتركه فارغاً لغرفة مفتوحة للجميع'
+                    }
                     value={currentRoomSettingsForm.password}
-                    onChange={(e) => setCurrentRoomSettingsForm({ ...currentRoomSettingsForm, password: e.target.value })}
+                    onChange={(e) =>
+                      setCurrentRoomSettingsForm({
+                        ...currentRoomSettingsForm,
+                        password: e.target.value,
+                        clearPassword: false
+                      })
+                    }
                     className="w-full p-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-xs outline-none focus:border-amber-500 font-mono"
                   />
+                  {currentRoomSettingsForm.isPasswordProtected && (
+                    <label className="flex items-center gap-2 text-[11px] text-rose-300 font-bold cursor-pointer select-none pt-0.5">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(currentRoomSettingsForm.clearPassword)}
+                        onChange={(e) =>
+                          setCurrentRoomSettingsForm({
+                            ...currentRoomSettingsForm,
+                            clearPassword: e.target.checked,
+                            password: e.target.checked ? '' : currentRoomSettingsForm.password
+                          })
+                        }
+                        className="accent-rose-500"
+                      />
+                      <span>إزالة الحماية بكلمة المرور وجعل الغرفة مفتوحة للجميع</span>
+                    </label>
+                  )}
                 </div>
 
                 {/* Room Welcome Message Section (الرسالة الترحيبية للغرفة لمالك الغرفة) */}
@@ -15604,7 +15787,7 @@ export default function App() {
                 </div>
 
                 {/* Deleted Message Notice (Admins Only) */}
-                {(currentUser?.role === 'admin' || currentUser?.role === 'super') && (
+                {(currentUser?.role === 'hassan' || currentUser?.role === 'admin' || currentUser?.role === 'super') && (
                   <div className="p-2.5 bg-slate-900/90 border border-slate-700/80 rounded-xl flex items-center justify-between gap-2">
                     <div>
                       <span className="font-bold text-amber-200 block text-xs">إشعار الرسائل المحذوفة (للإداريين فقط):</span>
@@ -15634,7 +15817,8 @@ export default function App() {
                     const roomName = currentUser?.room || 'الغرفة العامة';
                     const currentRoomObj = roomsList.find(r => r.name === roomName || r.id === roomName);
                     const roomId = currentRoomObj?.id || roomName;
-                    socket?.emit('updateRoomDetails', {
+                    const trimmedPass = currentRoomSettingsForm.password.trim();
+                    const updatePayload: Record<string, any> = {
                       roomId,
                       name: currentRoomSettingsForm.name,
                       desc: currentRoomSettingsForm.desc,
@@ -15643,11 +15827,17 @@ export default function App() {
                       slowModeSeconds: currentRoomSettingsForm.slowModeSeconds,
                       isVoiceLocked: currentRoomSettingsForm.isVoiceLocked,
                       showDeletedNotice: currentRoomSettingsForm.showDeletedNotice,
-                      isPasswordProtected: Boolean(currentRoomSettingsForm.password),
-                      password: currentRoomSettingsForm.password,
                       welcomeMessage: currentRoomSettingsForm.welcomeMessage,
                       welcomeEnabled: currentRoomSettingsForm.welcomeEnabled
-                    });
+                    };
+                    if (currentRoomSettingsForm.clearPassword) {
+                      updatePayload.isPasswordProtected = false;
+                      updatePayload.password = '';
+                    } else if (trimmedPass) {
+                      updatePayload.isPasswordProtected = true;
+                      updatePayload.password = trimmedPass;
+                    }
+                    socket?.emit('updateRoomDetails', updatePayload);
                     if (currentRoomSettingsForm.pinnedTopic !== undefined) {
                       setPinnedTopic(currentRoomSettingsForm.pinnedTopic);
                     }
@@ -16506,15 +16696,20 @@ export default function App() {
               </div>
 
               <div className="flex items-center gap-2">
-                {currentUser && (activeStoryViewer.username === currentUser.username || currentUser.role === 'admin' || currentUser.role === 'super') && (
+                {currentUser && (activeStoryViewer.username === currentUser.username || currentUser.role === 'hassan' || currentUser.role === 'admin' || currentUser.role === 'super') && (
                   <button
                     type="button"
                     onClick={() => {
-                      if (confirm('هل أنت متأكد من حذف هذه الخاطرة نهائياً؟')) {
-                        socket?.emit('deleteStory', { storyId: activeStoryViewer.id });
-                        setActiveStoryViewer(null);
-                        showToast('تم حذف الخاطرة بنجاح 🗑️', 'info');
-                      }
+                      const storyId = activeStoryViewer.id;
+                      openAppConfirm(
+                        'حذف الخاطرة',
+                        'هل أنت متأكد من حذف هذه الخاطرة نهائياً؟',
+                        () => {
+                          socket?.emit('deleteStory', { storyId });
+                          setActiveStoryViewer(null);
+                          showToast('تم حذف الخاطرة بنجاح 🗑️', 'info');
+                        }
+                      );
                     }}
                     className="p-1.5 rounded-lg bg-rose-900/60 hover:bg-rose-800 text-rose-300 text-xs font-bold transition-all"
                     title="حذف الخاطرة"
@@ -16971,6 +17166,72 @@ export default function App() {
             zIndex: -1
           }}
         />
+
+        {appDialog && (
+          <div
+            className="fixed inset-0 z-[10060] bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-4"
+            onClick={() => setAppDialog(null)}
+          >
+            <div
+              className="w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl overflow-hidden text-right"
+              dir="rtl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="px-4 py-3 bg-slate-950 border-b border-slate-800 flex items-center justify-between">
+                <h4 className="font-black text-sm text-white">{appDialog.title}</h4>
+                <button
+                  type="button"
+                  onClick={() => setAppDialog(null)}
+                  className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="p-4 space-y-3">
+                <p className="text-xs text-slate-200 whitespace-pre-line leading-relaxed">{appDialog.message}</p>
+                {appDialog.type === 'prompt' && (
+                  <input
+                    type={appDialog.inputType || 'text'}
+                    value={appDialogInput}
+                    onChange={(e) => setAppDialogInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        const val = appDialogInput;
+                        const cb = appDialog.onConfirm;
+                        setAppDialog(null);
+                        cb(val);
+                      }
+                    }}
+                    placeholder={appDialog.placeholder || ''}
+                    autoFocus
+                    className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white text-xs outline-none focus:border-amber-500"
+                  />
+                )}
+                <div className="flex items-center justify-end gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setAppDialog(null)}
+                    className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold cursor-pointer"
+                  >
+                    إلغاء
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const val = appDialogInput;
+                      const cb = appDialog.onConfirm;
+                      setAppDialog(null);
+                      cb(val);
+                    }}
+                    className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-black cursor-pointer"
+                  >
+                    تأكيد
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
       </div>
     </div>

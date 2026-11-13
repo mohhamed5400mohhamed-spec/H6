@@ -1,7 +1,11 @@
 {
+  "id": "/",
   "name": "شات حسان برو - غرف المحادثات الصوتية والنصية",
   "short_name": "حسان برو",
   "description": "منصة محادثات جماعية حية تدعم الصوت الجماعي عالي الجودة والدردشة النصية المحمية مع قاعدة بيانات لحفظ التاريخ ومنع تكرار الأسماء.",
+  "dir": "rtl",
+  "lang": "ar",
+  "scope": "/",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#020617",
@@ -12,7 +16,13 @@
       "src": "/favicon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
-      "purpose": "any maskable"
+      "purpose": "any"
+    },
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
     }
   ]
 }

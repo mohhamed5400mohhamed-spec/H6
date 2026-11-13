@@ -513,7 +513,7 @@ export const IdentityProfileStudio: React.FC<IdentityProfileStudioProps> = ({
                       : 'bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-slate-950 shadow-amber-500/20'
                   }`}
                 >
-                  {streakClaimedToday ? 'تم استلام مكافأة اليوم بنجاح ✓' : `استلم مكافأة اليوم الرابع (+${dailyStreakDay * 25} نقطة) 🎉`}
+                  {streakClaimedToday ? 'تم استلام مكافأة اليوم بنجاح ✓' : `استلم مكافأة اليوم (${dailyStreakDay}) (+${dailyStreakDay * 25} نقطة) 🎉`}
                 </button>
               </div>
             </div>

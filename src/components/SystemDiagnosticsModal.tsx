@@ -3,15 +3,11 @@ import {
   Activity,
   Wifi,
   Cpu,
-  Layers,
-  ShieldCheck,
   RefreshCw,
   Download,
   CheckCircle2,
-  AlertTriangle,
   Server,
-  Zap,
-  X
+  Zap
 } from 'lucide-react';
 
 export interface SystemDiagnosticsModalProps {
@@ -20,6 +16,7 @@ export interface SystemDiagnosticsModalProps {
   onlineCount: number;
   currentRoom: string;
   socketConnected: boolean;
+  pingLatency?: number | null;
   onShowToast: (msg: string, type?: 'info' | 'success' | 'error') => void;
 }
 
@@ -29,49 +26,75 @@ export const SystemDiagnosticsModal: React.FC<SystemDiagnosticsModalProps> = ({
   onlineCount,
   currentRoom,
   socketConnected,
+  pingLatency = null,
   onShowToast
 }) => {
-  const [ping, setPing] = useState(24);
-  const [fps, setFps] = useState(60);
-  const [packetLoss, setPacketLoss] = useState(0.1);
-  const [audioJitter, setAudioJitter] = useState(3.2); // ms
+  const [fps, setFps] = useState<number>(60);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
+  // Measure real browser frame rate while diagnostics modal is open
   useEffect(() => {
     if (!isOpen) return;
+    let frameCount = 0;
+    let lastTime = performance.now();
+    let rafId: number | null = null;
 
-    // Simulate periodic ping fluctuation
-    const interval = setInterval(() => {
-      setPing(Math.floor(18 + Math.random() * 14));
-      setPacketLoss(parseFloat((Math.random() * 0.2).toFixed(2)));
-      setAudioJitter(parseFloat((2 + Math.random() * 2).toFixed(1)));
-    }, 2000);
+    const tick = (now: number) => {
+      frameCount += 1;
+      const elapsed = now - lastTime;
+      if (elapsed >= 1000) {
+        setFps(Math.min(120, Math.round((frameCount * 1000) / elapsed)));
+        frameCount = 0;
+        lastTime = now;
+      }
+      rafId = requestAnimationFrame(tick);
+    };
 
-    return () => clearInterval(interval);
+    rafId = requestAnimationFrame(tick);
+    return () => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
+    };
   }, [isOpen]);
 
   const handleRunHealthCheck = () => {
     setIsRefreshing(true);
     setTimeout(() => {
       setIsRefreshing(false);
-      setPing(21);
-      onShowToast('تم اكتمال الفحص التشخيصي: جميع الأنظمة تعمل بكفاءة 100% 🟢', 'success');
-    }, 1200);
+      onShowToast(
+        socketConnected
+          ? 'تم الفحص التشخيصي: اتصال الخادم نشط ويعمل بشكل طبيعي 🟢'
+          : 'الخادم غير متصل حالياً، جاري محاولة إعادة الاتصال...',
+        socketConnected ? 'success' : 'error'
+      );
+    }, 500);
   };
+
+  const navConnection = typeof navigator !== 'undefined' ? (navigator as any).connection : null;
+  const networkTypeLabel = navConnection?.effectiveType ? String(navConnection.effectiveType).toUpperCase() : 'متاح';
+  const rttDisplay = pingLatency !== null ? `${pingLatency} ms` : 'جاري القياس...';
+  const qualityLabel =
+    !socketConnected
+      ? 'غير متصل'
+      : pingLatency === null
+        ? 'متصل'
+        : pingLatency < 80
+          ? 'ممتاز جداً'
+          : pingLatency < 180
+            ? 'جيد'
+            : 'بطيء نسبياً';
 
   const handleExportDiagnostics = () => {
     const report = {
       timestamp: new Date().toISOString(),
-      platform: 'ProChat Falcon Suite Web App',
+      platform: 'Hassan Pro Chat Web App',
       status: socketConnected ? 'Connected' : 'Disconnected',
       room: currentRoom,
       onlineUsers: onlineCount,
-      pingMs: ping,
-      packetLossPercent: packetLoss,
-      jitterMs: audioJitter,
+      pingMs: pingLatency,
+      measuredFps: fps,
+      networkEffectiveType: networkTypeLabel,
       browserUserAgent: navigator.userAgent,
-      screenResolution: `${window.innerWidth}x${window.innerHeight}`,
-      audioContextState: 'Running'
+      screenResolution: `${window.innerWidth}x${window.innerHeight}`
     };
 
     const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
@@ -104,17 +127,21 @@ export const SystemDiagnosticsModal: React.FC<SystemDiagnosticsModalProps> = ({
             <div>
               <h2 className="text-base font-bold text-white flex items-center gap-2">
                 لوحة فحص جودة الاتصال وصحة الخادم
-                <span className="text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 px-2 py-0.5 rounded-full flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-                  مستقر ومباشر
+                <span className={`text-[10px] px-2 py-0.5 rounded-full flex items-center gap-1 border ${
+                  socketConnected
+                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                    : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                }`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${socketConnected ? 'bg-emerald-400 animate-ping' : 'bg-rose-400'}`} />
+                  {socketConnected ? 'متصل ومباشر' : 'منقطع'}
                 </span>
               </h2>
-              <p className="text-xs text-slate-400">مراقبة دقيقة لزمن استجابة الصوت، جودة الـ WebRTC، وخوادم النقل</p>
+              <p className="text-xs text-slate-400">مراقبة حقيقية لزمن الاستجابة، حالة الاتصال، وأداء العرض الفعلي</p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors"
+            className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
           >
             ✕
           </button>
@@ -122,16 +149,15 @@ export const SystemDiagnosticsModal: React.FC<SystemDiagnosticsModalProps> = ({
 
         {/* Content */}
         <div className="p-5 space-y-4 overflow-y-auto">
-          {/* Key Metrics Grid */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            {/* Ping */}
+            {/* Real Ping */}
             <div className="bg-slate-800/60 border border-slate-700 p-3 rounded-xl text-center">
               <div className="text-[11px] text-slate-400 flex items-center justify-center gap-1 mb-1">
                 <Wifi className="w-3.5 h-3.5 text-emerald-400" />
                 سرعة الاستجابة Ping
               </div>
-              <div className="text-xl font-mono font-bold text-emerald-400">{ping} ms</div>
-              <div className="text-[10px] text-emerald-500/80 mt-0.5">ممتاز جداً</div>
+              <div className="text-xl font-mono font-bold text-emerald-400">{rttDisplay}</div>
+              <div className="text-[10px] text-emerald-500/80 mt-0.5">{qualityLabel}</div>
             </div>
 
             {/* Socket Status */}
@@ -143,44 +169,43 @@ export const SystemDiagnosticsModal: React.FC<SystemDiagnosticsModalProps> = ({
               <div className="text-sm font-bold text-white mt-1">
                 {socketConnected ? 'متصل بنجاح ✓' : 'انقطاع الاتصال'}
               </div>
-              <div className="text-[10px] text-slate-400 mt-1">WSS v4 / Realtime</div>
+              <div className="text-[10px] text-slate-400 mt-1">Socket.IO Realtime</div>
             </div>
 
-            {/* Packet Loss */}
+            {/* Real FPS */}
             <div className="bg-slate-800/60 border border-slate-700 p-3 rounded-xl text-center">
               <div className="text-[11px] text-slate-400 flex items-center justify-center gap-1 mb-1">
                 <Zap className="w-3.5 h-3.5 text-amber-400" />
-                فقدان الحزم Loss
+                معدل الإطارات FPS
               </div>
-              <div className="text-xl font-mono font-bold text-amber-400">{packetLoss}%</div>
-              <div className="text-[10px] text-slate-400 mt-0.5">شبه منعدم</div>
+              <div className="text-xl font-mono font-bold text-amber-400">{fps}</div>
+              <div className="text-[10px] text-slate-400 mt-0.5">قياس فعلي</div>
             </div>
 
-            {/* Jitter */}
+            {/* Network Info */}
             <div className="bg-slate-800/60 border border-slate-700 p-3 rounded-xl text-center">
               <div className="text-[11px] text-slate-400 flex items-center justify-center gap-1 mb-1">
                 <Cpu className="w-3.5 h-3.5 text-purple-400" />
-                تذبذب الصوت Jitter
+                الشبكة والتواجد
               </div>
-              <div className="text-xl font-mono font-bold text-purple-400">{audioJitter} ms</div>
-              <div className="text-[10px] text-slate-400 mt-0.5">استقرار فائق</div>
+              <div className="text-xl font-mono font-bold text-purple-400">{networkTypeLabel}</div>
+              <div className="text-[10px] text-slate-400 mt-0.5">{onlineCount} متصل الآن</div>
             </div>
           </div>
 
-          {/* System Check Status List */}
           <div className="bg-slate-800/40 border border-slate-700/60 rounded-xl p-4 space-y-2.5">
-            <h3 className="text-xs font-bold text-slate-200 mb-2">فحص المكونات التفاعلية الأساسية:</h3>
+            <h3 className="text-xs font-bold text-slate-200 mb-2">حالة المكونات الفعالة:</h3>
 
             {[
-              { name: 'محرك الصوت الشبكي WebRTC Audio Mesh', status: 'يعمل بجودة صوت ستيريو 48kHz', ok: true },
-              { name: 'قاعدة بيانات حفظ الرسائل وتاريخ المحادثة', status: 'متزامنة مع السيرفر المحلي والذاكرة', ok: true },
-              { name: 'بروتوكول حماية الأسماء ومنع التكرار', status: 'نظام التدقيق الفوري بالرتب فعال', ok: true },
-              { name: 'فلتر الكلمات الرقابي ومكافحة السبام', status: 'محدث مع قائمة الكلمات المحظورة', ok: true },
-              { name: 'خوارزمية تشفير المحادثات الخاصة', status: 'نقل آمن ثنائي الأطراف مشفر', ok: true }
+              { name: 'محرك الصوت الشبكي WebRTC Audio Mesh', status: 'WebRTC Opus + STUN/TURN', ok: true },
+              { name: 'اتصال Socket.IO الفوري بالخادم', status: socketConnected ? 'نشط ومتصل بالخادم' : 'جاري إعادة الاتصال', ok: socketConnected },
+              { name: 'مقاومة الخلفية والحفاظ على الجلسة', status: 'Wake Lock + Keep-Alive Active', ok: true },
+              { name: 'حماية الغرف والرتب والصلاحيات', status: 'تحقق من جهة الخادم', ok: true },
+              { name: 'مكالمات الخاص الصوتية والمرئية (P2P)', status: 'DTLS-SRTP via WebRTC', ok: true }
             ].map((item, idx) => (
               <div key={idx} className="flex items-center justify-between text-xs py-1 border-b border-slate-800 last:border-none">
                 <div className="flex items-center gap-2">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                  <CheckCircle2 className={`w-3.5 h-3.5 ${item.ok ? 'text-emerald-400' : 'text-rose-400'}`} />
                   <span className="text-slate-300">{item.name}</span>
                 </div>
                 <span className="text-[11px] text-slate-400">{item.status}</span>
@@ -188,19 +213,18 @@ export const SystemDiagnosticsModal: React.FC<SystemDiagnosticsModalProps> = ({
             ))}
           </div>
 
-          {/* Action buttons */}
           <div className="flex gap-2 pt-2">
             <button
               onClick={handleRunHealthCheck}
               disabled={isRefreshing}
-              className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-bold border border-slate-700 flex items-center justify-center gap-2 transition-colors"
+              className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-bold border border-slate-700 flex items-center justify-center gap-2 transition-colors cursor-pointer"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
               إعادة الفحص المباشر
             </button>
             <button
               onClick={handleExportDiagnostics}
-              className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-md flex items-center justify-center gap-2 transition-colors"
+              className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-md flex items-center justify-center gap-2 transition-colors cursor-pointer"
             >
               <Download className="w-3.5 h-3.5" />
               تحميل تقرير التشخيص JSON
@@ -213,7 +237,7 @@ export const SystemDiagnosticsModal: React.FC<SystemDiagnosticsModalProps> = ({
           <span>الغرفة النشطة: <b className="text-white">{currentRoom}</b> | المتواجدون: <b className="text-amber-400">{onlineCount}</b></span>
           <button
             onClick={onClose}
-            className="px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200"
+            className="px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 cursor-pointer"
           >
             إغلاق
           </button>

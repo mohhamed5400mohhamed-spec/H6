@@ -50,17 +50,19 @@ export const AudioEqualizerAndEffects: React.FC<AudioEqualizerAndEffectsProps> =
   const [ambientSound, setAmbientSound] = useState<'none' | 'rain' | 'campfire' | 'oud' | 'desert'>('none');
   const [ambientVolume, setAmbientVolume] = useState<number>(40);
 
-  // Mic Queue Demo
-  const [queueUsers, setQueueUsers] = useState<string[]>(['أبو فهد', 'صقر قريش', 'سلطانة البادية']);
+  // Mic Queue (real session queue)
+  const [queueUsers, setQueueUsers] = useState<string[]>([]);
   const [isInQueue, setIsInQueue] = useState<boolean>(false);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animationFrameRef = useRef<number | null>(null);
 
-  // Audio Context for Ambient generator and mic test
+  // Audio Context for Ambient generator and live mic test analyser
   const audioCtxRef = useRef<AudioContext | null>(null);
   const ambientGainRef = useRef<GainNode | null>(null);
   const ambientOscRef = useRef<OscillatorNode | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const micAnalyserRef = useRef<AnalyserNode | null>(null);
 
   const getAudioContext = () => {
     if (!audioCtxRef.current) {
@@ -75,6 +77,10 @@ export const AudioEqualizerAndEffects: React.FC<AudioEqualizerAndEffectsProps> =
 
   useEffect(() => {
     return () => {
+      if (micStreamRef.current) {
+        micStreamRef.current.getTracks().forEach((t) => t.stop());
+        micStreamRef.current = null;
+      }
       if (ambientOscRef.current) {
         try { ambientOscRef.current.stop(); } catch {}
         ambientOscRef.current = null;
@@ -86,7 +92,7 @@ export const AudioEqualizerAndEffects: React.FC<AudioEqualizerAndEffectsProps> =
     };
   }, []);
 
-  // Canvas visualizer animation
+  // Canvas visualizer animation (uses real AnalyserNode when mic test is active)
   useEffect(() => {
     if (!isOpen) return;
 
@@ -95,23 +101,33 @@ export const AudioEqualizerAndEffects: React.FC<AudioEqualizerAndEffectsProps> =
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    let step = 0;
+    const freqData = micAnalyserRef.current ? new Uint8Array(micAnalyserRef.current.frequencyBinCount) : null;
+
     const render = () => {
-      step += 0.05;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       const numBars = 32;
       const barWidth = canvas.width / numBars - 2;
 
+      if (micTestRunning && micAnalyserRef.current && freqData) {
+        micAnalyserRef.current.getByteFrequencyData(freqData);
+        const avg = freqData.reduce((acc, v) => acc + v, 0) / Math.max(1, freqData.length);
+        setTestAudioLevel(Math.min(100, Math.round((avg / 128) * 100)));
+      }
+
       for (let i = 0; i < numBars; i++) {
-        // Generate dynamic sound wave height based on mic active or effect
-        const baseHeight = isVoiceActive || micTestRunning ? 20 + Math.sin(step + i * 0.3) * 18 + Math.cos(step * 2 + i * 0.2) * 12 : 6;
+        let baseHeight = 6;
+        if (micTestRunning && freqData) {
+          const binIndex = Math.min(freqData.length - 1, Math.floor((i / numBars) * freqData.length));
+          baseHeight = 6 + (freqData[binIndex] / 255) * (canvas.height - 10);
+        } else if (isVoiceActive) {
+          baseHeight = 14 + ((i % 4) * 3);
+        }
         const normalizedHeight = Math.max(4, Math.min(canvas.height - 4, baseHeight * (micGain / 100)));
 
         const x = i * (barWidth + 2);
         const y = canvas.height - normalizedHeight;
 
-        // Gradient based on effect
         const grad = ctx.createLinearGradient(0, canvas.height, 0, 0);
         if (selectedEffect === 'falcon') {
           grad.addColorStop(0, '#f59e0b');
@@ -195,16 +211,39 @@ export const AudioEqualizerAndEffects: React.FC<AudioEqualizerAndEffectsProps> =
     }
   };
 
-  // Test microphone loopback
-  const handleToggleMicTest = () => {
+  // Test real microphone input level via Web Audio AnalyserNode
+  const handleToggleMicTest = async () => {
     if (micTestRunning) {
       setMicTestRunning(false);
       setTestAudioLevel(0);
+      if (micStreamRef.current) {
+        micStreamRef.current.getTracks().forEach((t) => t.stop());
+        micStreamRef.current = null;
+      }
+      micAnalyserRef.current = null;
       onShowToast('تم إيقاف اختبار الميكروفون', 'info');
-    } else {
+      return;
+    }
+
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        onShowToast('المتصفح لا يدعم التقاط الصوت لاختبار المايك', 'error');
+        return;
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { noiseSuppression, echoCancellation }
+      });
+      const ctx = getAudioContext();
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 128;
+      source.connect(analyser);
+      micStreamRef.current = stream;
+      micAnalyserRef.current = analyser;
       setMicTestRunning(true);
-      setTestAudioLevel(65);
-      onShowToast('جاري اختبار الميكروفون وسماع الصدى التجريبي 🎤', 'success');
+      onShowToast('جاري اختبار الميكروفون وقياس الترددات الحقيقية 🎤', 'success');
+    } catch {
+      onShowToast('تعذر الوصول إلى الميكروفون، يرجى منح الإذن من المتصفح', 'error');
     }
   };
 
@@ -568,18 +607,22 @@ export const AudioEqualizerAndEffects: React.FC<AudioEqualizerAndEffectsProps> =
                   </span>
                 </div>
                 <div className="flex flex-wrap gap-1.5 my-2">
-                  {queueUsers.map((u, i) => (
-                    <span
-                      key={i}
-                      className={`text-[10px] px-2 py-1 rounded-md border ${
-                        u === 'أنت'
-                          ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 font-bold'
-                          : 'bg-slate-700/60 text-slate-300 border-slate-600'
-                      }`}
-                    >
-                      {i + 1}. {u}
-                    </span>
-                  ))}
+                  {queueUsers.length === 0 ? (
+                    <span className="text-[11px] text-slate-400">قائمة الانتظار فارغة حالياً — المايك متاح</span>
+                  ) : (
+                    queueUsers.map((u, i) => (
+                      <span
+                        key={i}
+                        className={`text-[10px] px-2 py-1 rounded-md border ${
+                          u === 'أنت'
+                            ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 font-bold'
+                            : 'bg-slate-700/60 text-slate-300 border-slate-600'
+                        }`}
+                      >
+                        {i + 1}. {u}
+                      </span>
+                    ))
+                  )}
                 </div>
               </div>
               <button

@@ -642,11 +642,21 @@ export async function uploadMediaWithProgress(
   const apiBase = ((import.meta.env.VITE_SERVER_URL as string) || '').replace(/\/$/, '');
 
   return new Promise((resolve, reject) => {
+    const sessionToken = (() => {
+      try {
+        return localStorage.getItem('soqoor_session_token') || sessionStorage.getItem('soqoor_session_token') || '';
+      } catch {
+        return '';
+      }
+    })();
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${apiBase}/api/upload-media-binary`, true);
     xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
     xhr.setRequestHeader('x-filename', encodeURIComponent(file.name));
     xhr.setRequestHeader('x-mediatype', mediaType);
+    if (sessionToken) {
+      xhr.setRequestHeader('x-session-token', sessionToken);
+    }
 
     if (xhr.upload && onProgress) {
       xhr.upload.onprogress = (e) => {
@@ -700,9 +710,19 @@ function fallbackUpload(
   reader.onerror = () => reject && reject(new Error('فشل قراءة ملف الوسائط'));
   reader.onload = () => {
     const dataUrl = reader.result as string;
+    const sessionToken = (() => {
+      try {
+        return localStorage.getItem('soqoor_session_token') || sessionStorage.getItem('soqoor_session_token') || '';
+      } catch {
+        return '';
+      }
+    })();
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${apiBase}/api/upload-media`, true);
     xhr.setRequestHeader('Content-Type', 'application/json');
+    if (sessionToken) {
+      xhr.setRequestHeader('x-session-token', sessionToken);
+    }
 
     if (xhr.upload && onProgress) {
       xhr.upload.onprogress = (e) => {

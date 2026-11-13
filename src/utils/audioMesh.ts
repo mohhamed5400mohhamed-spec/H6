@@ -33,7 +33,7 @@ if (customTurnUrl) {
   });
 }
 
-const ICE_SERVERS: RTCConfiguration = {
+export const ICE_SERVERS: RTCConfiguration = {
   iceServers: defaultTurnServers,
   iceCandidatePoolSize: 10,
   iceTransportPolicy: 'all',

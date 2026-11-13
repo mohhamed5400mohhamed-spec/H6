@@ -611,15 +611,8 @@ export const ThemeAndWallpaperCenter: React.FC<ThemeAndWallpaperCenterProps> = (
   onApplyGlobalAppearance,
   onShowToast
 }) => {
-  if (!isOpen) return null;
-
   const [themeCategory, setThemeCategory] = React.useState<'all' | 'gold' | 'royal' | 'classic' | 'nature'>('all');
   const [wallpaperCategory, setWallpaperCategory] = React.useState<'all' | 'light' | 'dark' | 'pattern'>('all');
-
-  const filteredWallpapers = WALLPAPERS_LIST.filter((wp) => {
-    if (wallpaperCategory === 'all') return true;
-    return wp.category === wallpaperCategory;
-  });
 
   const allMergedThemes = React.useMemo(() => {
     const customDefs = (customThemes || []).map((ct) => buildThemeDefinitionFromCustom(ct));
@@ -627,6 +620,13 @@ export const ThemeAndWallpaperCenter: React.FC<ThemeAndWallpaperCenterProps> = (
     const nonOverriddenBuiltIns = THEMES_LIST.filter((th) => !customIds.has(th.id));
     return [...customDefs, ...nonOverriddenBuiltIns];
   }, [customThemes]);
+
+  if (!isOpen) return null;
+
+  const filteredWallpapers = WALLPAPERS_LIST.filter((wp) => {
+    if (wallpaperCategory === 'all') return true;
+    return wp.category === wallpaperCategory;
+  });
 
   const filteredThemes = allMergedThemes.filter((th) => {
     if (themeCategory === 'all') return true;

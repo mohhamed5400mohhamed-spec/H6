@@ -107,8 +107,7 @@ body {
   padding: 0;
   overflow: hidden;
   overflow-x: hidden !important;
-  background-color: #070b13;
-  color-scheme: dark;
+  background-color: var(--theme-app-bg, #070b13);
   -webkit-text-size-adjust: 100%;
   touch-action: manipulation;
 }

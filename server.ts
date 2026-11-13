@@ -30,22 +30,46 @@ app.set('trust proxy', 1);
 
 // Production, Security, and Cross-Origin Headers
 const allowedOrigins = new Set(
-  [process.env.CORS_ORIGIN, process.env.FRONTEND_URL, process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : undefined]
+  [
+    process.env.CORS_ORIGIN,
+    process.env.FRONTEND_URL,
+    process.env.APP_URL,
+    process.env.PUBLIC_SERVER_URL,
+    process.env.SERVER_PUBLIC_URL,
+    process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : undefined
+  ]
     .filter((origin): origin is string => Boolean(origin))
-    .map((origin) => origin.replace(/\/$/, ''))
+    .map((origin) => origin.trim().replace(/\/$/, ''))
 );
+
+function isOriginAllowed(origin: string | undefined, hostHeader?: string): boolean {
+  if (!origin) return true;
+  const normalized = origin.trim().replace(/\/$/, '');
+  if (allowedOrigins.has(normalized)) return true;
+  try {
+    const parsed = new URL(normalized);
+    if (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') return true;
+    if (hostHeader && parsed.host === hostHeader) return true;
+    if (process.env.NODE_ENV !== 'production') return true;
+  } catch {
+    return false;
+  }
+  return allowedOrigins.size === 0 ? false : false;
+}
 
 app.use((req, res, next) => {
   const requestOrigin = req.headers.origin;
   if (requestOrigin) {
-    res.setHeader('Access-Control-Allow-Origin', requestOrigin);
-    res.setHeader('Vary', 'Origin');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-  } else {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    if (isOriginAllowed(requestOrigin, req.headers.host)) {
+      res.setHeader('Access-Control-Allow-Origin', requestOrigin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+    } else if (req.method === 'OPTIONS') {
+      return res.sendStatus(403);
+    }
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-filename, x-mime-type, x-mediatype');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-session-token, x-filename, x-mime-type, x-mediatype');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-XSS-Protection', '1; mode=block');
   if (req.method === 'OPTIONS') {
@@ -63,8 +87,10 @@ httpServer.headersTimeout = 320000;
 const io = new SocketIOServer(httpServer, {
   cors: {
     origin: (origin, callback) => {
-      // In production and dev, allow all legitimate browser origins (including Cloud Run, local, preview domains)
-      return callback(null, true);
+      if (isOriginAllowed(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error('Origin not allowed by CORS'));
     },
     methods: ['GET', 'POST'],
     credentials: true
@@ -90,7 +116,19 @@ app.use(express.urlencoded({ limit: '10mb', extended: true }));
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
-app.use('/uploads', express.static(uploadsDir, { maxAge: '7d', etag: true }));
+app.use(
+  '/uploads',
+  express.static(uploadsDir, {
+    maxAge: '7d',
+    etag: true,
+    setHeaders: (res, filePath) => {
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      if (/\.(svg|html?|xml|js|mjs)$/i.test(filePath)) {
+        res.setHeader('Content-Disposition', 'attachment');
+      }
+    }
+  })
+);
 
 function toPublicMediaUrl(url: string, req?: express.Request): string {
   if (!url) return url;
@@ -247,12 +285,31 @@ app.get('/api/youtube-search', async (req, res) => {
   }
 });
 
+function extractUploadSessionToken(req: express.Request): string {
+  const headerToken = (req.headers['x-session-token'] as string) || '';
+  const authHeader = (req.headers['authorization'] as string) || '';
+  const bearer = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice(7).trim() : '';
+  return (headerToken || bearer).trim();
+}
+
+function isUploadAuthorized(req: express.Request): boolean {
+  const token = extractUploadSessionToken(req);
+  if (!token) return false;
+  const sess = activeSessions.get(token);
+  return Boolean(sess && !sess.isExplicitlyLoggedOut);
+}
+
 // HTTP Media Upload Endpoint: Bypasses WebSocket frames to prevent socket freeze/disconnect
 app.post('/api/upload-media-binary', async (req, res) => {
   try {
+    if (!isUploadAuthorized(req)) {
+      return res.status(401).json({ success: false, error: 'يجب تسجيل الدخول أولاً لرفع الملفات.' });
+    }
     const rawFilename = req.headers['x-filename'] ? decodeURIComponent(req.headers['x-filename'] as string) : 'file';
-    const mediaTypeHeader = (req.headers['x-mediatype'] as string) || '';
     const mime = (req.headers['content-type'] || '').toLowerCase();
+    if (mime.includes('svg') || /\.svg$/i.test(rawFilename)) {
+      return res.status(400).json({ success: false, error: 'صيغة SVG غير مسموح برفعها لأسباب أمنية.' });
+    }
 
     const uploadResult = await storageManager.saveStream(req, rawFilename, mime);
 
@@ -266,14 +323,17 @@ app.post('/api/upload-media-binary', async (req, res) => {
     });
   } catch (err: any) {
     console.error('Error in binary upload:', err);
-    return res.status(500).json({ success: false, error: 'فشل حفظ الملف على الخادم أو التخزين السحابي' });
+    return res.status(500).json({ success: false, error: err?.message || 'فشل حفظ الملف على الخادم أو التخزين السحابي' });
   }
 });
 
 app.post('/api/upload-media', async (req, res) => {
   try {
+    if (!isUploadAuthorized(req)) {
+      return res.status(401).json({ success: false, error: 'يجب تسجيل الدخول أولاً لرفع الملفات.' });
+    }
     const { dataUrl, filename, mediaType } = req.body;
-    if (!dataUrl) {
+    if (!dataUrl || typeof dataUrl !== 'string') {
       return res.status(400).json({ success: false, error: 'بيانات الملف مفقودة' });
     }
 
@@ -289,6 +349,13 @@ app.post('/api/upload-media', async (req, res) => {
     }
 
     const originalFilename = filename || `file_${Date.now()}`;
+    if (mime.includes('svg') || /\.svg$/i.test(originalFilename)) {
+      return res.status(400).json({ success: false, error: 'صيغة SVG غير مسموح برفعها لأسباب أمنية.' });
+    }
+    if (buffer.length > 25 * 1024 * 1024) {
+      return res.status(413).json({ success: false, error: 'حجم الملف يتجاوز 25 ميجابايت.' });
+    }
+
     const uploadResult = await storageManager.saveBuffer(buffer, originalFilename, mime);
 
     return res.json({
@@ -319,6 +386,7 @@ export async function ensureMediaUrlNotBase64(url: string | undefined): Promise<
     if (!matches || matches.length !== 3) return url;
 
     const mime = matches[1].toLowerCase();
+    if (mime.includes('svg')) return undefined;
     const base64Data = matches[2];
     const buffer = Buffer.from(base64Data, 'base64');
 
@@ -989,7 +1057,8 @@ function canPerformModeration(
     adminSiren: 'canBroadcast',
     deleteAccount: 'canDeleteAccounts',
     revealNicks: 'canRevealNicks',
-    resetName: 'canEditMemberProfile'
+    resetName: 'canEditMemberProfile',
+    broadcastMessage: 'canBroadcast'
   };
 
   const requiredPerm = actionPermissionMap[action];
@@ -2593,22 +2662,45 @@ function getPresenceSnapshot(): ConnectedUser[] {
   return Array.from(byUsername.values());
 }
 
-export function getAllRegisteredMembersPayload(viewerLevel: number = 0, viewerSocketId?: string) {
+export function getAllRegisteredMembersPayload(viewerLevel: number = 0, viewerSocketId?: string, viewerRole?: string) {
+  if (viewerLevel <= 0 && !viewerSocketId) return [];
+  const recipientUser = viewerSocketId ? users.find((u) => u.id === viewerSocketId) : undefined;
+  const effectiveLevel = recipientUser ? getRoleLevel(recipientUser.role) : viewerLevel;
+  const effectiveRole = recipientUser?.role || viewerRole || '';
+  if (!recipientUser && effectiveLevel <= 0) return [];
+
+  const canViewSensitivePii = Boolean(
+    effectiveLevel >= 50 ||
+    (effectiveRole && (
+      effectiveRole === 'hassan' ||
+      effectiveRole === 'admin' ||
+      effectiveRole === 'super' ||
+      hasPermission(effectiveRole, 'canAccessControlPanel') ||
+      hasPermission(effectiveRole, 'canRevealNicks')
+    ))
+  );
+
   const presenceSnapshot = getPresenceSnapshot();
   return Object.entries(registeredMembers).map(([username, m]) => {
     const onlineUser = presenceSnapshot.find((u) => u.username.toLowerCase() === username.toLowerCase());
-    const isSelf = Boolean(onlineUser && viewerSocketId && onlineUser.id === viewerSocketId);
+    const isSelf = Boolean(
+      (onlineUser && viewerSocketId && onlineUser.id === viewerSocketId) ||
+      (recipientUser && recipientUser.username.toLowerCase() === username.toLowerCase())
+    );
     const isGhostTarget = Boolean(onlineUser?.isGhost);
     const ghostLevel = onlineUser ? getRoleLevel(onlineUser.role) : getRoleLevel(m.role);
-    const canSeeGhost = isSelf || viewerLevel >= ghostLevel;
+    const canSeeGhost = isSelf || effectiveLevel >= ghostLevel;
     const isVisibleOnline = Boolean(onlineUser && (!isGhostTarget || canSeeGhost));
 
     const presenceState: 'online' | 'away' | 'offline' = isVisibleOnline ? (onlineUser!.presenceState || 'online') : 'offline';
-    const allIps = Array.from(new Set([
-      ...(onlineUser?.ipAddress && onlineUser.ipAddress !== '192.168.1.100' ? [onlineUser.ipAddress] : []),
-      ...(m.ipAddress && m.ipAddress !== '192.168.1.100' ? [m.ipAddress] : []),
-      ...(Array.isArray(m.ipHistory) ? m.ipHistory.filter((ip) => ip && ip !== '192.168.1.100') : [])
-    ]));
+    const includePii = canViewSensitivePii || isSelf;
+    const allIps = includePii
+      ? Array.from(new Set([
+          ...(onlineUser?.ipAddress && onlineUser.ipAddress !== '192.168.1.100' ? [onlineUser.ipAddress] : []),
+          ...(m.ipAddress && m.ipAddress !== '192.168.1.100' ? [m.ipAddress] : []),
+          ...(Array.isArray(m.ipHistory) ? m.ipHistory.filter((ip) => ip && ip !== '192.168.1.100') : [])
+        ]))
+      : [];
     return {
       username,
       role: m.role,
@@ -2620,10 +2712,14 @@ export function getAllRegisteredMembersPayload(viewerLevel: number = 0, viewerSo
       honorBadge: m.honorBadge,
       nameBannerUrl: onlineUser?.nameBannerUrl || m.nameBannerUrl || '',
       giftBadges: onlineUser?.giftBadges || m.giftBadges || [],
-      ipAddress: onlineUser?.ipAddress || m.ipAddress || allIps[0] || 'غير متوفر',
-      ipHistory: allIps,
-      deviceInfo: onlineUser?.deviceInfo || m.deviceInfo || 'جهاز ذكي',
-      deviceFingerprint: onlineUser?.deviceFingerprint || m.deviceFingerprint || 'FP-DEV-DEFAULT',
+      ...(includePii ? {
+        ipAddress: onlineUser?.ipAddress || m.ipAddress || allIps[0] || 'غير متوفر',
+        ipHistory: allIps,
+        deviceInfo: onlineUser?.deviceInfo || m.deviceInfo || 'جهاز ذكي',
+        deviceFingerprint: onlineUser?.deviceFingerprint || m.deviceFingerprint || 'FP-DEV-DEFAULT'
+      } : {
+        ipHistory: [] as string[]
+      }),
       isJailed: Boolean(m.isJailed || jailedUsernames.has(username.toLowerCase())),
       isPmDisabled: Boolean(onlineUser?.isPmDisabled ?? m.isPmDisabled),
       isOnline: Boolean(isVisibleOnline && presenceState !== 'offline'),
@@ -2634,6 +2730,15 @@ export function getAllRegisteredMembersPayload(viewerLevel: number = 0, viewerSo
       engagement: m.engagement || getDefaultEngagement()
     };
   });
+}
+
+export function broadcastAllRegisteredMembers() {
+  for (const [socketId, s] of io.sockets.sockets.entries()) {
+    const recipient = users.find((u) => u.id === socketId);
+    if (!recipient) continue;
+    const viewerLevel = getRoleLevel(recipient.role);
+    s.emit('allRegisteredMembers', getAllRegisteredMembersPayload(viewerLevel, socketId, recipient.role));
+  }
 }
 
 // Connected live users store (الأعضاء الفعليون المتواجدون فقط بدون وهمي)
@@ -2681,7 +2786,9 @@ export function broadcastAllUsers() {
     s.emit('allUsers', filtered);
     const onlineCount = filtered.filter((u) => u.presenceState !== 'offline').length;
     s.emit('onlineCountUpdated', onlineCount);
-    s.emit('allRegisteredMembers', getAllRegisteredMembersPayload(viewerLevel, socketId));
+    if (recipient) {
+      s.emit('allRegisteredMembers', getAllRegisteredMembersPayload(viewerLevel, socketId, recipient.role));
+    }
   }
 }
 
@@ -3158,10 +3265,13 @@ export function getActiveVoiceCountForRoom(roomId: string): number {
 }
 
 export function getChatRoomsWithLiveCounts(): ChatRoom[] {
-  return chatRooms.map((r) => ({
-    ...r,
-    activeVoiceCount: getActiveVoiceCountForRoom(r.id)
-  }));
+  return chatRooms.map((r) => {
+    const { password: _omittedPassword, ...safeRoom } = r;
+    return {
+      ...safeRoom,
+      activeVoiceCount: getActiveVoiceCountForRoom(r.id)
+    };
+  });
 }
 
 export function broadcastRoomsUpdate() {
@@ -3446,7 +3556,7 @@ export function hydrateAllCollectionsFromStorage(isRehydration = false) {
         falconAvatarIcon: emblemsConfig.falconAvatarIcon
       });
       io.emit('globalAppearanceUpdated', globalAppearance);
-      io.emit('allRegisteredMembers', getAllRegisteredMembersPayload());
+      broadcastAllRegisteredMembers();
       io.emit('monitoredWordsUpdated', monitoredWords);
       io.emit('messageRetentionLimitsUpdated', messageRetentionLimits);
       io.emit('recentLoginsUpdated', getRecentLogins());
@@ -3616,7 +3726,7 @@ io.on('connection', (socket) => {
   socket.emit('rolesConfigUpdated', rolesConfig);
   socket.emit('rolePermissionsUpdated', rolePermissions);
   socket.emit('allUsers', getPresenceSnapshot().filter((u) => !u.isGhost));
-  socket.emit('allRegisteredMembers', getAllRegisteredMembersPayload(0, socket.id));
+  socket.emit('allRegisteredMembers', []);
 
   socket.emit('recentLoginsUpdated', getRecentLogins());
   socket.emit('messageRetentionLimitsUpdated', messageRetentionLimits);
@@ -3661,7 +3771,7 @@ io.on('connection', (socket) => {
   // Admin Data on-demand (sent to authorized admin and staff roles with control panel permissions)
   socket.on('getAdminData', () => {
     const admin = users.find((u) => u.id === socket.id);
-    if (admin && (admin.role === 'admin' || admin.role === 'super' || hasPermission(admin.role, 'canAccessControlPanel') || getRoleLevel(admin.role) >= 50)) {
+    if (admin && (admin.role === 'hassan' || admin.role === 'admin' || admin.role === 'super' || hasPermission(admin.role, 'canAccessControlPanel') || getRoleLevel(admin.role) >= 50)) {
       socket.emit('adminInitialData', {
         bannedList: Array.from(bannedRecords.values()),
         staffMemos,
@@ -3670,14 +3780,14 @@ io.on('connection', (socket) => {
         rolePermissions,
         serverSecurity
       });
-      socket.emit('allRegisteredMembers', getAllRegisteredMembersPayload());
+      socket.emit('allRegisteredMembers', getAllRegisteredMembersPayload(getRoleLevel(admin.role), socket.id, admin.role));
     }
   });
 
   socket.on('getRegisteredMembers', () => {
     const admin = users.find((u) => u.id === socket.id);
-    if (admin && (admin.role === 'admin' || admin.role === 'super' || hasPermission(admin.role, 'canAccessControlPanel') || getRoleLevel(admin.role) >= 50)) {
-      socket.emit('allRegisteredMembers', getAllRegisteredMembersPayload());
+    if (admin && (admin.role === 'hassan' || admin.role === 'admin' || admin.role === 'super' || hasPermission(admin.role, 'canAccessControlPanel') || getRoleLevel(admin.role) >= 50)) {
+      socket.emit('allRegisteredMembers', getAllRegisteredMembersPayload(getRoleLevel(admin.role), socket.id, admin.role));
     }
   });
 
@@ -3911,8 +4021,9 @@ io.on('connection', (socket) => {
       }
     });
 
-    if (registeredMembers[cleanUser]) {
-      registeredMembers[cleanUser].nameBannerUrl = cleanBannerUrl;
+    const regFoundBanner = getRegisteredMember(cleanUser);
+    if (regFoundBanner) {
+      regFoundBanner.member.nameBannerUrl = cleanBannerUrl;
       saveMembers();
     }
 
@@ -3965,39 +4076,44 @@ io.on('connection', (socket) => {
     }
     const cleanUser = sanitizeText(username)?.trim();
     if (!cleanUser || !giftUrl) return;
-
-    users.forEach((u) => {
-      if (u.username.toLowerCase() === cleanUser.toLowerCase()) {
-        if (!u.giftBadges) u.giftBadges = [];
-        if (!u.giftBadges.includes(giftUrl)) {
-          u.giftBadges.push(giftUrl);
-        }
-      }
-    });
-
-    if (!registeredMembers[cleanUser]) {
-      registeredMembers[cleanUser] = {
-        password: '123',
-        role: 'member',
-        flag: '🇾🇪',
-        statusQuote: 'عضو في حسان برو',
-        likes: 0,
-        points: 0,
-        giftBadges: [giftUrl]
-      };
-    } else {
-      if (!registeredMembers[cleanUser].giftBadges) registeredMembers[cleanUser].giftBadges = [];
-      if (!registeredMembers[cleanUser].giftBadges!.includes(giftUrl)) {
-        registeredMembers[cleanUser].giftBadges!.push(giftUrl);
-      }
+    const isSafeGiftUrl =
+      typeof giftUrl === 'string' &&
+      (giftUrl.startsWith('/') ||
+        giftUrl.startsWith('https://') ||
+        (giftUrl.startsWith('data:image/') && !giftUrl.toLowerCase().startsWith('data:image/svg')));
+    if (!isSafeGiftUrl) {
+      socket.emit('systemAlert', 'رابط الوسام أو الهدية غير صالح.');
+      return;
     }
-    saveMembers();
 
-    io.emit('userStyleUpdated', {
-      username: cleanUser,
-      giftBadges: registeredMembers[cleanUser].giftBadges
+    const regGiftFound = getRegisteredMember(cleanUser);
+    const liveGiftMatches = users.filter((u) => u.username.toLowerCase() === cleanUser.toLowerCase());
+    if (!regGiftFound && liveGiftMatches.length === 0) {
+      socket.emit('systemAlert', 'لم يتم العثور على هذا العضو.');
+      return;
+    }
+
+    liveGiftMatches.forEach((u) => {
+      if (!u.giftBadges) u.giftBadges = [];
+      if (!u.giftBadges.includes(giftUrl)) {
+        u.giftBadges.push(giftUrl);
+      }
     });
-    const targetUser = users.find((u) => u.username.toLowerCase() === cleanUser.toLowerCase());
+
+    if (regGiftFound) {
+      if (!regGiftFound.member.giftBadges) regGiftFound.member.giftBadges = [];
+      if (!regGiftFound.member.giftBadges.includes(giftUrl)) {
+        regGiftFound.member.giftBadges.push(giftUrl);
+      }
+      saveMembers();
+    }
+
+    const updatedGiftBadges = regGiftFound?.member.giftBadges || liveGiftMatches[0]?.giftBadges || [giftUrl];
+    io.emit('userStyleUpdated', {
+      username: regGiftFound?.key || cleanUser,
+      giftBadges: updatedGiftBadges
+    });
+    const targetUser = liveGiftMatches[0];
     if (targetUser?.room) {
       broadcastRoomUsers(targetUser.room);
     }
@@ -4022,14 +4138,15 @@ io.on('connection', (socket) => {
       }
     });
 
-    if (registeredMembers[cleanUser] && registeredMembers[cleanUser].giftBadges) {
-      registeredMembers[cleanUser].giftBadges = registeredMembers[cleanUser].giftBadges!.filter((g) => g !== giftUrl);
+    const regRemoveFound = getRegisteredMember(cleanUser);
+    if (regRemoveFound?.member.giftBadges) {
+      regRemoveFound.member.giftBadges = regRemoveFound.member.giftBadges.filter((g) => g !== giftUrl);
       saveMembers();
     }
 
     io.emit('userStyleUpdated', {
-      username: cleanUser,
-      giftBadges: registeredMembers[cleanUser]?.giftBadges || []
+      username: regRemoveFound?.key || cleanUser,
+      giftBadges: regRemoveFound?.member.giftBadges || []
     });
     const targetUser = users.find((u) => u.username.toLowerCase() === cleanUser.toLowerCase());
     if (targetUser?.room) {
@@ -4054,42 +4171,43 @@ io.on('connection', (socket) => {
     const actor = users.find((u) => u.id === socket.id);
     if (!actor) return;
     const cleanTarget = sanitizeText(targetUsername)?.trim();
-    if (!cleanTarget || !giftUrl) return;
+    const cleanGiftUrl = typeof giftUrl === 'string' ? giftUrl.trim() : '';
+    if (!cleanTarget || !cleanGiftUrl) return;
+    if (!/^(\/|https?:\/\/|data:image\/)/i.test(cleanGiftUrl) || cleanGiftUrl.toLowerCase().startsWith('data:image/svg')) {
+      socket.emit('systemAlert', 'رابط الهدية غير صالح.');
+      return;
+    }
+
+    const targetOnline = users.find((u) => u.username.toLowerCase() === cleanTarget.toLowerCase());
+    const regFound = getRegisteredMember(cleanTarget);
+    if (!targetOnline && !regFound) {
+      socket.emit('systemAlert', 'المستخدم المستهدف غير موجود.');
+      return;
+    }
+    const resolvedTargetName = regFound?.key || targetOnline?.username || cleanTarget;
 
     // 1. Update online user records (تحديث العضو إذا كان متصلاً حالياً)
     users.forEach((u) => {
-      if (u.username.toLowerCase() === cleanTarget.toLowerCase()) {
+      if (u.username.toLowerCase() === resolvedTargetName.toLowerCase()) {
         if (!u.giftBadges) u.giftBadges = [];
-        // Put newly gifted item at index 0 so it's the active companion gift beside avatar
-        u.giftBadges = [giftUrl, ...u.giftBadges.filter((g) => g !== giftUrl)];
+        u.giftBadges = [cleanGiftUrl, ...u.giftBadges.filter((g) => g !== cleanGiftUrl)];
       }
     });
 
-    // 2. Persist in registered members database (حفظ دائم بالسيرفر)
-    if (!registeredMembers[cleanTarget]) {
-      registeredMembers[cleanTarget] = {
-        password: '123',
-        role: 'member',
-        flag: '🇾🇪',
-        statusQuote: 'عضو في حسان برو',
-        likes: 1,
-        points: 10,
-        giftBadges: [giftUrl]
-      };
-    } else {
-      if (!registeredMembers[cleanTarget].giftBadges) registeredMembers[cleanTarget].giftBadges = [];
-      registeredMembers[cleanTarget].giftBadges = [giftUrl, ...registeredMembers[cleanTarget].giftBadges!.filter((g) => g !== giftUrl)];
+    // 2. Persist in existing registered members database (حفظ دائم بالسيرفر دون إنشاء حسابات بكلمة مرور ضعيفة)
+    if (regFound) {
+      if (!regFound.member.giftBadges) regFound.member.giftBadges = [];
+      regFound.member.giftBadges = [cleanGiftUrl, ...regFound.member.giftBadges.filter((g) => g !== cleanGiftUrl)];
+      saveMembers();
     }
-    saveMembers();
 
     // 3. Broadcast updated giftBadges across all clients
-    const finalGifts = registeredMembers[cleanTarget]?.giftBadges || [giftUrl];
+    const finalGifts = regFound?.member.giftBadges || targetOnline?.giftBadges || [cleanGiftUrl];
     io.emit('userStyleUpdated', {
-      username: cleanTarget,
+      username: resolvedTargetName,
       giftBadges: finalGifts
     });
 
-    const targetOnline = users.find((u) => u.username.toLowerCase() === cleanTarget.toLowerCase());
     if (targetOnline?.room) {
       broadcastRoomUsers(targetOnline.room);
     }
@@ -4163,14 +4281,15 @@ io.on('connection', (socket) => {
       }
     });
 
-    if (registeredMembers[cleanUser] && registeredMembers[cleanUser].giftBadges) {
-      registeredMembers[cleanUser].giftBadges = [giftUrl, ...registeredMembers[cleanUser].giftBadges!.filter((g) => g !== giftUrl)];
+    const regPinFound = getRegisteredMember(cleanUser);
+    if (regPinFound?.member.giftBadges) {
+      regPinFound.member.giftBadges = [giftUrl, ...regPinFound.member.giftBadges.filter((g) => g !== giftUrl)];
       saveMembers();
     }
 
     io.emit('userStyleUpdated', {
-      username: cleanUser,
-      giftBadges: registeredMembers[cleanUser]?.giftBadges || [giftUrl]
+      username: regPinFound?.key || cleanUser,
+      giftBadges: regPinFound?.member.giftBadges || [giftUrl]
     });
     broadcastAllUsers();
     socket.emit('systemAlert', 'تم تثبيت هديتك المرافقة لاسمك بنجاح 🎁✨');
@@ -4398,7 +4517,7 @@ io.on('connection', (socket) => {
 
     io.emit('rolesConfigUpdated', rolesConfig);
     io.emit('rolePermissionsUpdated', rolePermissions);
-    io.emit('allRegisteredMembers', getAllRegisteredMembersPayload());
+    broadcastAllRegisteredMembers();
     logMonitorEvent('role', `حذف الرتبة [${targetRole.name}] بواسطة ${admin.username}`, admin.username);
     socket.emit('systemAlert', `تم حذف الرتبة [${targetRole.name}] بنجاح 🗑️`);
     broadcastAllUsers();
@@ -4510,11 +4629,9 @@ io.on('connection', (socket) => {
       socket.emit('ghostPermissionResult', { username: '', allowed: false });
       return;
     }
-    const reg = registeredMembers[clean] || registeredMembers[clean.toLowerCase()];
+    const reg = getRegisteredMember(clean)?.member;
     let role = 'member';
-    if (clean.toLowerCase() === 'sajan' || clean.toLowerCase() === 'admin') {
-      role = 'admin';
-    } else if (reg) {
+    if (reg) {
       role = reg.role;
     }
     const allowed = Boolean(rolePermissions[role]?.canGhostLogin);
@@ -4635,11 +4752,12 @@ io.on('connection', (socket) => {
     if (nameGradient !== undefined) user.nameGradient = nameGradient;
     if (profileBg !== undefined) user.profileBg = profileBg;
 
-    if (registeredMembers[user.username]) {
-      if (nameColor !== undefined) (registeredMembers[user.username] as any).nameColor = nameColor;
-      if (textColor !== undefined) (registeredMembers[user.username] as any).textColor = textColor;
-      if (nameGradient !== undefined) (registeredMembers[user.username] as any).nameGradient = nameGradient;
-      if (profileBg !== undefined) (registeredMembers[user.username] as any).profileBg = profileBg;
+    const regStyleFound = getRegisteredMember(user.username);
+    if (regStyleFound) {
+      if (nameColor !== undefined) (regStyleFound.member as any).nameColor = nameColor;
+      if (textColor !== undefined) (regStyleFound.member as any).textColor = textColor;
+      if (nameGradient !== undefined) (regStyleFound.member as any).nameGradient = nameGradient;
+      if (profileBg !== undefined) (regStyleFound.member as any).profileBg = profileBg;
       saveMembers();
     }
 
@@ -4684,10 +4802,11 @@ io.on('connection', (socket) => {
     if (nameColor) user.nameColor = nameColor;
     if (textColor) user.textColor = textColor;
 
-    if (registeredMembers[user.username]) {
-      if (fontSize) (registeredMembers[user.username] as any).fontSize = fontSize;
-      if (nameColor) (registeredMembers[user.username] as any).nameColor = nameColor;
-      if (textColor) (registeredMembers[user.username] as any).textColor = textColor;
+    const regPrefFound = getRegisteredMember(user.username);
+    if (regPrefFound) {
+      if (fontSize) (regPrefFound.member as any).fontSize = fontSize;
+      if (nameColor) (regPrefFound.member as any).nameColor = nameColor;
+      if (textColor) (regPrefFound.member as any).textColor = textColor;
       saveMembers();
     }
 
@@ -5154,7 +5273,7 @@ io.on('connection', (socket) => {
       }
 
       // Sync user personal member data (ignored users, starred messages, friends) from MongoDB
-      const regMemberData = registeredMembers[session.user.username];
+      const regMemberData = getRegisteredMember(session.user.username)?.member;
       if (regMemberData) {
         socket.emit('userMemberDataSync', {
           ignoredUsers: regMemberData.ignoredUsers || [],
@@ -5184,7 +5303,7 @@ io.on('connection', (socket) => {
         socket.emit('monitorLogs', monitorLogs.slice(0, 1000));
         socket.emit('messageRetentionLimitsUpdated', messageRetentionLimits);
         socket.emit('monitoredWordsUpdated', monitoredWords);
-        socket.emit('allRegisteredMembers', getAllRegisteredMembersPayload(userRoleLevel, socket.id));
+        socket.emit('allRegisteredMembers', getAllRegisteredMembersPayload(userRoleLevel, socket.id, session.user.role));
       }
     } else {
       socket.emit('sessionRestoreFailed', { reason: 'انتهت صلاحية الجلسة أو تم تسجيل الدخول من جهاز آخر.' });
@@ -5525,8 +5644,12 @@ io.on('connection', (socket) => {
     socket.emit('roomStats', getRoomStatistics());
   });
 
-  // Get Banned List for Control Panel
+  // Get Banned List for Control Panel (Admin/Staff Only)
   socket.on('getBannedList', () => {
+    const admin = users.find((u) => u.id === socket.id);
+    if (!admin || (!isSupremeHassan(admin) && admin.role !== 'admin' && admin.role !== 'super' && !hasPermission(admin.role, 'canAccessControlPanel') && !hasPermission(admin.role, 'canUnban') && getRoleLevel(admin.role) < 50)) {
+      return;
+    }
     socket.emit('bannedListUpdated', Array.from(bannedRecords.values()));
   });
 
@@ -5535,9 +5658,47 @@ io.on('connection', (socket) => {
     socket.emit('roomSettingsUpdated', { room, settings: getRoomSettings(room) });
   });
 
-  // Get Server Security Settings
+  // Verify room password server-side without ever sending passwords to clients
+  socket.on('verifyRoomPassword', ({ roomId, password }: { roomId: string; password?: string }, callback?: (res: { ok: boolean; error?: string }) => void) => {
+    const actor = users.find((u) => u.id === socket.id);
+    const roomObj = chatRooms.find((r) => r.id === roomId);
+    if (!roomObj) {
+      callback?.({ ok: false, error: 'الغرفة غير موجودة.' });
+      return;
+    }
+    if (!roomObj.isPasswordProtected || !roomObj.password) {
+      callback?.({ ok: true });
+      return;
+    }
+    if (actor && (isSupremeHassan(actor) || actor.role === 'admin' || getRoleLevel(actor.role) >= getRoleLevel('admin'))) {
+      callback?.({ ok: true });
+      return;
+    }
+    if ((password || '').trim() === roomObj.password) {
+      callback?.({ ok: true });
+    } else {
+      callback?.({ ok: false, error: 'كلمة المرور غير صحيحة، يرجى إعادة المحاولة' });
+    }
+  });
+
+  // Get Server Security Settings (Full config for admins, public-safe fields for general users)
   socket.on('getServerSecurity', () => {
-    socket.emit('serverSecurityUpdated', serverSecurity);
+    const actor = users.find((u) => u.id === socket.id);
+    const isAdminViewer = Boolean(
+      actor && (isSupremeHassan(actor) || actor.role === 'admin' || actor.role === 'super' || hasPermission(actor.role, 'canAccessControlPanel') || getRoleLevel(actor.role) >= 50)
+    );
+    if (isAdminViewer) {
+      socket.emit('serverSecurityUpdated', serverSecurity);
+    } else {
+      socket.emit('serverSecurityUpdated', {
+        marqueeTicker: serverSecurity.marqueeTicker,
+        guestsAllowed: serverSecurity.guestsAllowed,
+        emergencyLockdown: serverSecurity.emergencyLockdown,
+        blockExternalLinks: serverSecurity.blockExternalLinks,
+        awayDelaySeconds: serverSecurity.awayDelaySeconds,
+        reconnectBannerDelaySeconds: serverSecurity.reconnectBannerDelaySeconds
+      });
+    }
   });
 
   // Update Server Security Settings (Admin Only)
@@ -5676,8 +5837,15 @@ io.on('connection', (socket) => {
     if (room) {
       if (data.name !== undefined) room.name = sanitizeText(data.name);
       if (data.desc !== undefined) room.desc = sanitizeText(data.desc);
-      if (data.isPasswordProtected !== undefined) room.isPasswordProtected = data.isPasswordProtected;
-      if (data.password !== undefined) room.password = data.password;
+      if (data.isPasswordProtected === false) {
+        room.isPasswordProtected = false;
+        delete room.password;
+      } else if (data.isPasswordProtected === true || (data.password && data.password.trim())) {
+        if (data.password && data.password.trim()) {
+          room.isPasswordProtected = true;
+          room.password = sanitizeText(data.password.trim());
+        }
+      }
       saveChatRooms();
       broadcastRoomsUpdate();
     }
@@ -5872,6 +6040,7 @@ io.on('connection', (socket) => {
     room,
     loginType,
     password,
+    roomPassword,
     flag,
     statusQuote,
     deviceFingerprint,
@@ -5882,6 +6051,7 @@ io.on('connection', (socket) => {
     room?: string;
     loginType?: string;
     password?: string;
+    roomPassword?: string;
     flag?: string;
     statusQuote?: string;
     deviceFingerprint?: string;
@@ -6015,9 +6185,9 @@ io.on('connection', (socket) => {
 
     // 1.5. GEOGRAPHIC ACCESS RESTRICTION ENFORCEMENT (تقييد وحظر الوصول الجغرافي لدول معينة)
     if (serverSecurity.geoRestrictionEnabled && Array.isArray(serverSecurity.geoRestrictedCountries) && serverSecurity.geoRestrictedCountries.length > 0) {
-      const prospectiveRole = registeredMembers[cleanUsername]?.role || (loginType === 'member' ? 'member' : 'guest');
+      const prospectiveRole = getRegisteredMember(cleanUsername)?.member.role || (loginType === 'member' ? 'member' : 'guest');
       // Admin and Super accounts are always exempt from geo-restrictions
-      if (prospectiveRole !== 'admin' && prospectiveRole !== 'super') {
+      if (!isSupremeHassan(prospectiveRole) && prospectiveRole !== 'admin' && prospectiveRole !== 'super') {
         const headerCountry = ((socket.handshake.headers['cf-ipcountry'] || socket.handshake.headers['x-country-code'] || socket.handshake.headers['x-appengine-country']) as string || '').toUpperCase();
         const flagCountry = flag ? (flagToCodeMap[flag] || '') : '';
         const detectedCountry = headerCountry || flagCountry || '';
@@ -6046,7 +6216,7 @@ io.on('connection', (socket) => {
     // 2. JAIL ROOM ENFORCEMENT (سجن واحتجاز حسان برو - منع الخروج)
     const isUserJailed = jailedUsernames.has(cleanUsername.toLowerCase()) || 
                          jailedIps.has(clientIp) || 
-                         Boolean(registeredMembers[cleanUsername]?.isJailed);
+                         Boolean(getRegisteredMember(cleanUsername)?.member.isJailed);
 
     // If an existing live user is in jail and trying to switch rooms:
     const liveSession = users.find((u) => u.id === socket.id);
@@ -6064,7 +6234,7 @@ io.on('connection', (socket) => {
 
     // Security Checks: Lockdown and Guest Restrictions
     if (serverSecurity.emergencyLockdown) {
-      const prospectiveRole = registeredMembers[cleanUsername]?.role || (loginType === 'member' ? 'member' : 'guest');
+      const prospectiveRole = getRegisteredMember(cleanUsername)?.member.role || (loginType === 'member' ? 'member' : 'guest');
       if (!isSupremeHassan(prospectiveRole) && prospectiveRole !== 'admin' && prospectiveRole !== 'super') {
         socket.emit('loginError', '🔒 وضع الطوارئ الإداري (Emergency Lockdown) مفعل حالياً. الدخول محصور بالإدارة والمشرفين.');
         return;
@@ -6190,6 +6360,22 @@ io.on('connection', (socket) => {
       }
     }
 
+    // Server-side Room Password Enforcement (atomic check before tearing down old sessions/rooms)
+    const preRegRes = getRegisteredMember(cleanUsername);
+    const resolvedPreRole = preRegRes?.member.role || (loginType === 'visitor' ? 'guest' : 'member');
+    const targetRoomDef = chatRooms.find((r) => r.id === finalTargetRoom);
+    if (targetRoomDef?.isPasswordProtected && targetRoomDef.password) {
+      const isAlreadyInTargetRoom = liveSession?.room === finalTargetRoom;
+      const isRoomAdminBypass = isSupremeHassan(resolvedPreRole) || resolvedPreRole === 'admin' || getRoleLevel(resolvedPreRole) >= getRoleLevel('admin');
+      const isJailAutoPlacement = finalTargetRoom === 'سجن حسان برو' && isUserJailed;
+      if (!isAlreadyInTargetRoom && !isRoomAdminBypass && !isJailAutoPlacement) {
+        if ((roomPassword || '').trim() !== targetRoomDef.password) {
+          socket.emit('systemAlert', `🔒 كلمة المرور غير صحيحة لدخول غرفة [${targetRoomDef.name}].`);
+          return;
+        }
+      }
+    }
+
     // =========================================================================
     // ENFORCE STRICT SINGLE-SESSION PER MEMBER / ACCOUNT
     // (يمنع تعدد الجلسات تماماً: عند تسجيل الدخول من جهاز أو متصفح أو صفحة أخرى،
@@ -6298,7 +6484,7 @@ io.on('connection', (socket) => {
       saveMembers();
     }
 
-    const userRole = reg?.role || (resolvedUsername.toLowerCase() === 'sajan' ? 'admin' : loginType === 'visitor' ? 'guest' : 'member');
+    const userRole = reg?.role || (loginType === 'visitor' ? 'guest' : 'member');
     let userQuote = '';
     if (reg?.statusQuote && reg.statusQuote.trim() && reg.statusQuote.trim() !== 'عضو جديد' && reg.statusQuote.trim() !== '..') {
       userQuote = reg.statusQuote.trim();
@@ -6416,23 +6602,22 @@ io.on('connection', (socket) => {
     socket.emit('chatHistory', []);
 
     // Send profile visitors for the logged-in user
-    socket.emit('profileVisitorsUpdated', registeredMembers[cleanUsername]?.visitors || []);
+    socket.emit('profileVisitorsUpdated', reg?.visitors || []);
 
     // Deliver queued offline private messages if any (persisted in MongoDB)
-    const pendingPmList = offlinePrivateMessages.get(cleanUsername.toLowerCase());
+    const pendingPmList = offlinePrivateMessages.get(resolvedUsername.toLowerCase());
     if (pendingPmList && pendingPmList.length > 0) {
       socket.emit('offlinePrivateMessages', pendingPmList);
-      offlinePrivateMessages.delete(cleanUsername.toLowerCase());
+      offlinePrivateMessages.delete(resolvedUsername.toLowerCase());
       saveOfflinePrivateMessages();
     }
 
     // Sync member personal data (ignored users, starred messages, friends) from MongoDB
-    const regMember = registeredMembers[cleanUsername];
-    if (regMember) {
+    if (reg) {
       socket.emit('userMemberDataSync', {
-        ignoredUsers: regMember.ignoredUsers || [],
-        starredMessages: regMember.starredMessages || [],
-        friends: regMember.friends || []
+        ignoredUsers: reg.ignoredUsers || [],
+        starredMessages: reg.starredMessages || [],
+        friends: reg.friends || []
       });
     }
 
@@ -6519,7 +6704,7 @@ io.on('connection', (socket) => {
 
     // Authoritative global snapshot broadcast so every client sees updated rooms and presence
     broadcastAllUsers();
-    io.emit('allRegisteredMembers', getAllRegisteredMembersPayload());
+    broadcastAllRegisteredMembers();
 
     // Send admin data to admin, super, or custom roles with control panel permissions / level >= 50
     const userRoleLevel = getRoleLevel(newUser.role);
@@ -6538,7 +6723,7 @@ io.on('connection', (socket) => {
       socket.emit('monitorLogs', monitorLogs.slice(0, 1000));
       socket.emit('messageRetentionLimitsUpdated', messageRetentionLimits);
       socket.emit('monitoredWordsUpdated', monitoredWords);
-      socket.emit('allRegisteredMembers', getAllRegisteredMembersPayload(userRoleLevel, socket.id));
+      socket.emit('allRegisteredMembers', getAllRegisteredMembersPayload(userRoleLevel, socket.id, newUser.role));
     }
   });
 
@@ -6700,7 +6885,7 @@ io.on('connection', (socket) => {
     saveHistory();
 
     // Increment engagement messages count & calculate progression
-    const regMember = registeredMembers[user.username];
+    const regMember = getRegisteredMember(user.username)?.member;
     if (regMember) {
       if (!regMember.engagement) regMember.engagement = getDefaultEngagement();
       regMember.engagement.messagesSent += 1;
@@ -6902,7 +7087,7 @@ io.on('connection', (socket) => {
 
     const readOnlyActions = ['getRoomStats', 'getBannedList', 'getMonitorLogs'];
     const actionsWithoutTarget = [
-      'unban', 'globalBroadcast', 'globalClearChat', 'pullAllUsers', 'editRoom', 'deleteRoom', 
+      'unban', 'globalBroadcast', 'broadcastMessage', 'globalClearChat', 'pullAllUsers', 'editRoom', 'deleteRoom', 
       'lockRoomChat', 'setSlowMode', 'lockRoomVoice', 'setRoomPassword', 'adminSiren',
       ...readOnlyActions
     ];
@@ -6914,13 +7099,18 @@ io.on('connection', (socket) => {
 
     const targetProxy = target ? target : (offlineMember ? { username: resolvedTargetName!, role: offlineMember.role } : undefined);
 
-    // Role Permission & Hierarchy Check: strictly check all non-read-only actions
+    const isStaffAdmin = isSupremeHassan(admin) || admin.role === 'admin' || admin.role === 'super' || hasPermission(admin.role, 'canAccessControlPanel') || getRoleLevel(admin.role) >= 50;
+
+    // Role Permission & Hierarchy Check: strictly check all non-read-only actions and sensitive read-only actions
     if (!readOnlyActions.includes(action)) {
       const perm = canPerformModeration(admin, targetProxy, action);
       if (!perm.allowed) {
         socket.emit('systemAlert', perm.reason || 'ليست لديك الصلاحية لتنفيذ هذا الإجراء.');
         return;
       }
+    } else if ((action === 'getBannedList' || action === 'getMonitorLogs') && !isStaffAdmin) {
+      socket.emit('systemAlert', 'ليست لديك الصلاحية لعرض السجلات الإدارية الحساسة.');
+      return;
     }
 
     switch (action) {
@@ -7028,7 +7218,7 @@ io.on('connection', (socket) => {
           if (tIdx !== -1) users.splice(tIdx, 1);
           broadcastRoomUsers(target.room);
           broadcastAllUsers();
-          io.emit('allRegisteredMembers', getAllRegisteredMembersPayload());
+          broadcastAllRegisteredMembers();
           io.emit('onlineCountUpdated', getPresenceSnapshot().filter((u) => u.presenceState !== 'offline').length);
           socket.emit('systemAlert', `تم طرد ${target.username} بنجاح (مع فرض مهلة دقيقتين لمنع الإزعاج).`);
         }
@@ -7052,7 +7242,7 @@ io.on('connection', (socket) => {
             }
           }
         }
-        if (!targetIp) targetIp = clientIp || '192.168.1.1';
+        if (!targetIp) targetIp = undefined;
 
         const allTargetFps = new Set<string>();
         if (target?.deviceFingerprint) allTargetFps.add(target.deviceFingerprint);
@@ -7076,7 +7266,7 @@ io.on('connection', (socket) => {
 
         // 2. Add to banned sets (username, IP, and all device fingerprints + UID + hardware core)
         bannedUsers.add(uName.toLowerCase());
-        if (isBannableIp(targetIp)) bannedIps.add(targetIp);
+        if (targetIp && isBannableIp(targetIp)) bannedIps.add(targetIp);
         targetFingerprintsList.forEach((fpItem) => {
           addFingerprintToBanSet(fpItem);
           if (fingerprintToAccountsMap.has(fpItem)) {
@@ -7148,9 +7338,9 @@ io.on('connection', (socket) => {
         });
 
         io.emit('bannedListUpdated', Array.from(bannedRecords.values()));
-        io.emit('allRegisteredMembers', getAllRegisteredMembersPayload());
-        logMonitorEvent('ban', `حظر دائم لـ ${uName} وعنوان الـ IP [${targetIp}] وبصمة الجهاز [${targetFingerprint || 'غير مسجلة'}] بواسطة [${admin.role.toUpperCase()}] ${admin.username} (السبب: ${banReason})`, admin.username, uName);
-        socket.emit('systemAlert', `تم تطبيق الباند والحظر النهائي على ${uName} وبصمة جهازه وعنوان الـ IP [${targetIp}] بنجاح.`);
+        broadcastAllRegisteredMembers();
+        logMonitorEvent('ban', `حظر دائم لـ ${uName} وعنوان الـ IP [${targetIp || 'غير مسجل'}] وبصمة الجهاز [${targetFingerprint || 'غير مسجلة'}] بواسطة [${admin.role.toUpperCase()}] ${admin.username} (السبب: ${banReason})`, admin.username, uName);
+        socket.emit('systemAlert', `تم تطبيق الباند والحظر النهائي على ${uName}${targetIp ? ` وعنوان الـ IP [${targetIp}]` : ''} بنجاح.`);
         break;
       }
 
@@ -7252,14 +7442,15 @@ io.on('connection', (socket) => {
         if (target) {
           target.points = pts;
         }
-        if (registeredMembers[uName]) {
-          registeredMembers[uName].points = pts;
+        const regPointsFound = getRegisteredMember(uName);
+        if (regPointsFound) {
+          regPointsFound.member.points = pts;
           saveMembers();
         }
         if (target) {
           broadcastRoomUsers(target.room);
         }
-        io.emit('allRegisteredMembers', getAllRegisteredMembersPayload());
+        broadcastAllRegisteredMembers();
         logMonitorEvent('role', `تعديل رصيد نقاط ${uName} إلى (${pts}) بواسطة مدير النظام ${admin.username}`, admin.username, uName);
         socket.emit('systemAlert', `تم تعديل نقاط ${uName} إلى ${pts}.`);
         break;
@@ -7310,14 +7501,42 @@ io.on('connection', (socket) => {
         break;
       }
 
-      // مسح سجل محادثات الغرفة للجميع (Global Clear Chat)
+      // مسح سجل محادثات الغرفة للجميع (Global Clear Chat for admin's current room only)
       case 'globalClearChat': {
         const room = admin.room;
-        chatHistory.length = 0;
+        for (let i = chatHistory.length - 1; i >= 0; i--) {
+          if (chatHistory[i].room === room) {
+            chatHistory.splice(i, 1);
+          }
+        }
         saveHistory();
         io.to(room).emit('chatHistory', []);
-        io.to(room).emit('systemAlert', `🧹 قام المشرف ${admin.username} بمسح سجل محادثات الغرفة كاملاً للجميع.`);
+        io.to(room).emit('systemAlert', `🧹 قام المشرف ${admin.username} بمسح سجل محادثات غرفة [${room}] للجميع.`);
         logMonitorEvent('role', `مسح سجل محادثات الغرفة [${room}] بواسطة ${admin.username}`, admin.username);
+        break;
+      }
+
+      // بث رسالة إدارية في الغرفة الحالية (Broadcast Message / Sticker Preview)
+      case 'broadcastMessage': {
+        const cleanBroadcast = sanitizeText(value);
+        if (!cleanBroadcast) break;
+        const msgObj: StoredMessage = {
+          id: `bcast-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+          room: admin.room,
+          username: admin.username,
+          avatarUrl: admin.avatarUrl,
+          nameBannerUrl: admin.nameBannerUrl,
+          flag: admin.flag,
+          badge: '📢 بث إداري',
+          badgeColor: 'text-amber-400',
+          text: expandShortcuts(cleanBroadcast),
+          time: getCurrentTimeString(),
+          timestamp: Date.now()
+        };
+        chatHistory.push(msgObj);
+        pruneRoomChatHistory(admin.room);
+        saveHistory();
+        io.to(admin.room).emit('message', msgObj);
         break;
       }
 
@@ -7391,7 +7610,7 @@ io.on('connection', (socket) => {
           broadcastRoomUsers(target.room);
           io.to(target.id).emit('systemAlert', `تم حذف صورتك الشخصية بواسطة الإدارة (${admin.username}) لمخالفتها الآداب العامة.`);
         }
-        io.emit('allRegisteredMembers', getAllRegisteredMembersPayload());
+        broadcastAllRegisteredMembers();
         io.emit('userStyleUpdated', { username: regFound?.key || uName, avatarUrl: undefined });
         logMonitorEvent('role', `حذف صورة ${uName} بواسطة [${admin.role.toUpperCase()}] ${admin.username}`, admin.username, uName);
         socket.emit('systemAlert', `تم حذف صورة ${uName} بنجاح.`);
@@ -7419,7 +7638,7 @@ io.on('connection', (socket) => {
             broadcastRoomUsers(target.room);
             io.to(target.id).emit('systemAlert', `تم تحديث صورتك الشخصية بواسطة الإدارة (${admin.username}).`);
           }
-          io.emit('allRegisteredMembers', getAllRegisteredMembersPayload());
+          broadcastAllRegisteredMembers();
           io.emit('userStyleUpdated', { username: regFound?.key || uName, avatarUrl: value });
           logMonitorEvent('role', `تحديث صورة ${uName} بواسطة [${admin.role.toUpperCase()}] ${admin.username}`, admin.username, uName);
           socket.emit('systemAlert', `تم تحديث صورة ${uName} بنجاح.`);
@@ -7447,7 +7666,7 @@ io.on('connection', (socket) => {
         if (target) {
           broadcastRoomUsers(target.room);
         }
-        io.emit('allRegisteredMembers', getAllRegisteredMembersPayload());
+        broadcastAllRegisteredMembers();
         logMonitorEvent('likes', `تعديل لايكات ${uName} إلى (${lks}) بواسطة ${admin.username}`, admin.username, uName);
         socket.emit('systemAlert', `تم تعديل لايكات ${uName} إلى ${lks}.`);
         break;
@@ -7473,7 +7692,7 @@ io.on('connection', (socket) => {
         if (target) {
           broadcastRoomUsers(target.room);
         }
-        io.emit('allRegisteredMembers', getAllRegisteredMembersPayload());
+        broadcastAllRegisteredMembers();
         socket.emit('systemAlert', `تم تحديث حالة ${uName} بنجاح.`);
         break;
       }
@@ -7510,7 +7729,7 @@ io.on('connection', (socket) => {
               broadcastRoomUsers(target.room);
               io.to(target.id).emit('systemAlert', `تم تعديل اسمك/زخرفتك إلى [${newName}] بواسطة الإدارة.`);
             }
-            io.emit('allRegisteredMembers', getAllRegisteredMembersPayload());
+            broadcastAllRegisteredMembers();
             logMonitorEvent('role', `تعديل اسم/زخرفة ${oldName} إلى [${newName}] بواسطة ${admin.username}`, admin.username, oldName);
             socket.emit('systemAlert', `تم تعديل اسم ${oldName} إلى ${newName} بنجاح.`);
           }
@@ -7553,7 +7772,7 @@ io.on('connection', (socket) => {
             io.to(target.id).emit('userRoleUpdated', { role: roleId });
           }
           broadcastAllUsers();
-          io.emit('allRegisteredMembers', getAllRegisteredMembersPayload());
+          broadcastAllRegisteredMembers();
           logMonitorEvent('role', `ترقية وتعيين رتبة ${uName} إلى [${validRole.name || roleId}] بواسطة ${admin.username}`, admin.username, uName);
           socket.emit('systemAlert', `تم تحديث رتبة ${uName} إلى [${validRole.name || roleId}] بنجاح.`);
         }
@@ -7585,7 +7804,7 @@ io.on('connection', (socket) => {
           io.to(target.id).emit('systemAlert', `🔑 قامت الإدارة (${admin.username}) بتحديث وتعيين كلمة مرور جديدة لحسابك: [${newPassword}]. يرجى حفظها لاستخدامها عند تسجيل الدخول.`);
         }
 
-        io.emit('allRegisteredMembers', getAllRegisteredMembersPayload());
+        broadcastAllRegisteredMembers();
         logMonitorEvent('role', `قام ${admin.username} بتغيير وتعيين كلمة مرور جديدة لحساب [${regFound.key}]`, admin.username, regFound.key);
         socket.emit('systemAlert', `✅ تم تغيير وتحديث كلمة مرور العضو [${regFound.key}] بنجاح إلى: ${newPassword}`);
         break;
@@ -7612,14 +7831,11 @@ io.on('connection', (socket) => {
         if (!uName) break;
         const jailReason = reason || value || 'مخالفة قوانين وقواعد شات حسان برو';
 
-        let targetIp = target?.ipAddress;
-        if (!targetIp && registeredMembers[uName]?.ipAddress) {
-          targetIp = registeredMembers[uName].ipAddress;
-        }
-        if (!targetIp) targetIp = '192.168.1.1';
+        const regJailFound = getRegisteredMember(uName);
+        let targetIp = target?.ipAddress || regJailFound?.member.ipAddress;
 
         jailedUsernames.add(uName.toLowerCase());
-        if (targetIp) jailedIps.add(targetIp);
+        if (targetIp && isBannableIp(targetIp)) jailedIps.add(targetIp);
         jailedRecords.set(uName.toLowerCase(), {
           username: uName,
           ip: targetIp,
@@ -7629,8 +7845,8 @@ io.on('connection', (socket) => {
         });
         saveJailed();
 
-        if (registeredMembers[uName]) {
-          registeredMembers[uName].isJailed = true;
+        if (regJailFound) {
+          regJailFound.member.isJailed = true;
           saveMembers();
         }
 
@@ -7653,7 +7869,7 @@ io.on('connection', (socket) => {
           broadcastRoomUsers('سجن حسان برو');
         }
 
-        io.emit('allRegisteredMembers', getAllRegisteredMembersPayload());
+        broadcastAllRegisteredMembers();
         io.emit('roomStatsUpdated', getRoomStatistics());
         logMonitorEvent('jail', `إيداع ${uName} في السجن بواسطة [${admin.role.toUpperCase()}] ${admin.username} (السبب: ${jailReason})`, admin.username, uName);
         socket.emit('systemAlert', `تم إيداع ${uName} في السجن وتثبيت حبسه بنجاح 🚔.`);
@@ -7701,7 +7917,7 @@ io.on('connection', (socket) => {
           broadcastRoomUsers('الغرفة العامة');
         }
 
-        io.emit('allRegisteredMembers', getAllRegisteredMembersPayload());
+        broadcastAllRegisteredMembers();
         io.emit('roomStatsUpdated', getRoomStatistics());
         logMonitorEvent('jail', `الإفراج عن ${uName} من السجن بواسطة ${admin.username}`, admin.username, uName);
         socket.emit('systemAlert', `تم الإفراج عن ${uName} ونقله للغرفة العامة بنجاح 🕊️.`);
@@ -7740,7 +7956,7 @@ io.on('connection', (socket) => {
           broadcastRoomUsers(target.room);
         }
         broadcastAllUsers();
-        io.emit('allRegisteredMembers', getAllRegisteredMembersPayload());
+        broadcastAllRegisteredMembers();
         io.emit('onlineCountUpdated', getPresenceSnapshot().filter((u) => u.presenceState !== 'offline').length);
         logMonitorEvent('role', `حذف حساب وعضوية [${regFound?.key || uName}] نهائياً بواسطة ${admin.username}`, admin.username, regFound?.key || uName);
         socket.emit('systemAlert', `تم حذف حساب وعضوية [${regFound?.key || uName}] نهائياً.`);
@@ -7778,7 +7994,7 @@ io.on('connection', (socket) => {
           broadcastRoomUsers(target.room);
           io.to(target.id).emit('systemAlert', `تم تعديل اسمك المخالف إلى [${newName}] بواسطة إدارة الشات.`);
         }
-        io.emit('allRegisteredMembers', getAllRegisteredMembersPayload());
+        broadcastAllRegisteredMembers();
         logMonitorEvent('role', `تعديل اسم ${oldName} إلى [${newName}] بواسطة ${admin.username}`, admin.username, oldName);
         socket.emit('systemAlert', `تم تعديل اسم ${oldName} إلى [${newName}] بنجاح.`);
         break;
@@ -7807,7 +8023,7 @@ io.on('connection', (socket) => {
           broadcastRoomUsers(target.room);
           io.to(target.id).emit('systemAlert', badgeText ? `🎉 تم منحك وساماً شرفياً جديداً من الإدارة: ${badgeText}` : 'تمت إزالة الوسام الشرفي.');
         }
-        io.emit('allRegisteredMembers', getAllRegisteredMembersPayload());
+        broadcastAllRegisteredMembers();
         logMonitorEvent('role', `منح/تعديل الوسام الشرفي لـ ${uName} [${badgeText || 'إزالة'}] بواسطة ${admin.username}`, admin.username, uName);
         socket.emit('systemAlert', `تم تحديث الوسام الشرفي لـ ${uName} بنجاح.`);
         break;
@@ -7907,17 +8123,29 @@ io.on('connection', (socket) => {
       if (!user) return;
 
       const oldUsername = user.username;
-      if (username && username.trim() && username.trim() !== oldUsername) {
-        const cleanNew = sanitizeText(username.trim());
-        const isTaken = users.some((u) => u.id !== user.id && u.username.toLowerCase() === cleanNew.toLowerCase());
-        if (!isTaken) {
-          user.username = cleanNew;
-          user.avatarSeed = cleanNew;
-          if (registeredMembers[oldUsername]) {
-            const prev = registeredMembers[oldUsername];
-            delete registeredMembers[oldUsername];
-            registeredMembers[cleanNew] = prev;
-          }
+      const requestedCleanNew = username && username.trim() ? sanitizeText(username.trim()) : '';
+      if (requestedCleanNew && requestedCleanNew.toLowerCase() !== oldUsername.toLowerCase()) {
+        const isTakenLive = users.some((u) => u.id !== user.id && u.username.toLowerCase() === requestedCleanNew.toLowerCase());
+        const isTakenRegistered = Boolean(getRegisteredMember(requestedCleanNew));
+        if (isTakenLive || isTakenRegistered) {
+          socket.emit('systemAlert', `الاسم [${requestedCleanNew}] مسجل أو مستخدم بالفعل ولا يمكن تغييره لهذا الاسم.`);
+          return;
+        }
+        const existingRegOld = getRegisteredMember(oldUsername);
+        user.username = requestedCleanNew;
+        user.avatarSeed = requestedCleanNew;
+        if (existingRegOld) {
+          delete registeredMembers[existingRegOld.key];
+          registeredMembers[requestedCleanNew] = existingRegOld.member;
+        }
+        if (user.sessionToken && activeSessions.has(user.sessionToken)) {
+          const sess = activeSessions.get(user.sessionToken)!;
+          sess.user.username = requestedCleanNew;
+        }
+        if (usernameToSessionMap.has(oldUsername.toLowerCase())) {
+          const tok = usernameToSessionMap.get(oldUsername.toLowerCase())!;
+          usernameToSessionMap.delete(oldUsername.toLowerCase());
+          usernameToSessionMap.set(requestedCleanNew.toLowerCase(), tok);
         }
       }
 
@@ -7930,32 +8158,39 @@ io.on('connection', (socket) => {
       if (textColor !== undefined) user.textColor = textColor;
       if (isPmDisabled !== undefined) user.isPmDisabled = Boolean(isPmDisabled);
 
-      // Update registered members persistent store
-      if (!registeredMembers[user.username]) {
-        registeredMembers[user.username] = {
-          password: hashPassword(password || '123'),
-          role: user.role === 'admin' ? 'admin' : user.role === 'super' ? 'super' : 'member',
-          flag: user.flag,
-          statusQuote: user.statusQuote,
-          avatarUrl: user.avatarUrl,
-          nameBannerUrl: user.nameBannerUrl,
-          isPmDisabled: user.isPmDisabled,
-          likes: user.likes || 0,
-          points: user.points || 100,
-          nameColor: user.nameColor,
-          textColor: user.textColor
-        };
+      // Update registered members persistent store (do not auto-convert unauthenticated guests into registered members without explicit password)
+      const currentRegFound = getRegisteredMember(user.username);
+      if (!currentRegFound) {
+        if (password && String(password).trim().length >= 3) {
+          registeredMembers[user.username] = {
+            password: hashPassword(String(password).trim()),
+            role: user.role === 'admin' ? 'admin' : user.role === 'super' ? 'super' : 'member',
+            flag: user.flag,
+            statusQuote: user.statusQuote,
+            avatarUrl: user.avatarUrl,
+            nameBannerUrl: user.nameBannerUrl,
+            isPmDisabled: user.isPmDisabled,
+            likes: user.likes || 0,
+            points: user.points || 100,
+            nameColor: user.nameColor,
+            textColor: user.textColor
+          };
+          if (user.role === 'guest') user.role = 'member';
+        }
       } else {
-        if (password) registeredMembers[user.username].password = hashPassword(password);
-        registeredMembers[user.username].statusQuote = user.statusQuote;
-        if (avatarUrl !== undefined) registeredMembers[user.username].avatarUrl = avatarUrl;
-        if (nameBannerUrl !== undefined) registeredMembers[user.username].nameBannerUrl = user.nameBannerUrl;
-        if (isPmDisabled !== undefined) registeredMembers[user.username].isPmDisabled = Boolean(isPmDisabled);
-        if (user.flag) registeredMembers[user.username].flag = user.flag;
-        if (nameColor !== undefined) (registeredMembers[user.username] as any).nameColor = nameColor;
-        if (textColor !== undefined) (registeredMembers[user.username] as any).textColor = textColor;
+        if (password && String(password).trim().length >= 3) {
+          currentRegFound.member.password = hashPassword(String(password).trim());
+        }
+        currentRegFound.member.statusQuote = user.statusQuote;
+        if (avatarUrl !== undefined) currentRegFound.member.avatarUrl = avatarUrl;
+        if (nameBannerUrl !== undefined) currentRegFound.member.nameBannerUrl = user.nameBannerUrl;
+        if (isPmDisabled !== undefined) currentRegFound.member.isPmDisabled = Boolean(isPmDisabled);
+        if (user.flag) currentRegFound.member.flag = user.flag;
+        if (nameColor !== undefined) (currentRegFound.member as any).nameColor = nameColor;
+        if (textColor !== undefined) (currentRegFound.member as any).textColor = textColor;
       }
       saveMembers();
+      persistActiveSessions();
       if (statusQuote !== undefined) {
         io.emit('recentLoginsUpdated', getRecentLogins());
       }
@@ -7971,15 +8206,15 @@ io.on('connection', (socket) => {
         profileBg: user.profileBg,
         isPmDisabled: user.isPmDisabled
       });
-      io.emit('allRegisteredMembers', getAllRegisteredMembersPayload());
+      broadcastAllRegisteredMembers();
 
       // Broadcast update to all rooms and users
       chatRooms.forEach((r) => {
         broadcastRoomUsers(r.id);
       });
       broadcastAllUsers();
-  socket.emit('profileUpdated', { user });
-  socket.emit('systemAlert', 'تم حفظ وتحديث بيانات ملفك الشخصي بنجاح ✅');
+      socket.emit('profileUpdated', { user });
+      socket.emit('systemAlert', 'تم حفظ وتحديث بيانات ملفك الشخصي بنجاح ✅');
     }
   );
 
@@ -8054,6 +8289,10 @@ io.on('connection', (socket) => {
           let ext = 'jpg';
           if (matches && matches.length === 3) {
             mime = matches[1].toLowerCase();
+            if (mime.includes('svg')) {
+              socket.emit('systemAlert', 'عفواً، ملفات SVG غير مدعومة لأسباب أمنية.');
+              return;
+            }
             if (mime.includes('mp4')) ext = 'mp4';
             else if (mime.includes('webm')) ext = 'webm';
             else if (mime.includes('mov') || mime.includes('quicktime')) ext = 'mov';
@@ -8106,7 +8345,7 @@ io.on('connection', (socket) => {
       saveWallPosts();
 
       // Increment engagement progression for wall posting
-      const regMember = registeredMembers[user.username];
+      const regMember = getRegisteredMember(user.username)?.member;
       if (regMember) {
         if (!regMember.engagement) regMember.engagement = getDefaultEngagement();
         regMember.engagement.wallPostsCount += 1;
@@ -8260,6 +8499,10 @@ io.on('connection', (socket) => {
           let ext = 'jpg';
           if (matches && matches.length === 3) {
             mime = matches[1].toLowerCase();
+            if (mime.includes('svg')) {
+              socket.emit('systemAlert', 'عفواً، ملفات SVG غير مدعومة لأسباب أمنية.');
+              return;
+            }
             if (mime.includes('mp4')) ext = 'mp4';
             else if (mime.includes('webm')) ext = 'webm';
             else if (mime.includes('mov') || mime.includes('quicktime')) ext = 'mov';
@@ -8300,7 +8543,7 @@ io.on('connection', (socket) => {
       saveStories();
 
       // Increment engagement for creating a story
-      const regMember = registeredMembers[user.username];
+      const regMember = getRegisteredMember(user.username)?.member;
       if (regMember) {
         if (!regMember.engagement) regMember.engagement = getDefaultEngagement();
         regMember.engagement.wallPostsCount += 1;
@@ -8425,14 +8668,24 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Reaction to Chat Message (التفاعل بالإيموجي مع الرسائل)
+  // Reaction to Chat Message (التفاعل بالإيموجي مع الرسائل - منع التكرار لكل عضو)
   socket.on('reactChatMessage', ({ messageId, emoji }: { messageId: string; emoji: string }) => {
     const user = users.find((u) => u.id === socket.id);
-    if (!user) return;
+    if (!user || !emoji) return;
     const msg = chatHistory.find((m) => m.id === messageId);
     if (msg) {
       if (!msg.reactions) msg.reactions = {};
-      msg.reactions[emoji] = (msg.reactions[emoji] || 0) + 1;
+      const reactedMap = ((msg as any)._reactedUsers ||= {}) as Record<string, string[]>;
+      const list = reactedMap[emoji] || [];
+      const userKey = user.username.toLowerCase();
+      if (list.includes(userKey)) {
+        reactedMap[emoji] = list.filter((u) => u !== userKey);
+        msg.reactions[emoji] = Math.max(0, (msg.reactions[emoji] || 1) - 1);
+        if (msg.reactions[emoji] === 0) delete msg.reactions[emoji];
+      } else {
+        reactedMap[emoji] = [...list, userKey];
+        msg.reactions[emoji] = (msg.reactions[emoji] || 0) + 1;
+      }
       saveHistory();
       io.to(msg.room).emit('chatMessageReactionUpdated', { messageId, reactions: msg.reactions });
     }
@@ -8558,17 +8811,24 @@ io.on('connection', (socket) => {
     socket.emit('systemAlert', 'تم استلام بلاغك بنجاح وسيقوم المشرفون بمراجعته فوراً 🛡️');
   });
 
-  // Add Points Reward from Games & Activities
+  // Add Points Reward from Games & Activities (with anti-abuse cooldown)
   socket.on('addPointsReward', ({ amount, reason }: { amount: number; reason: string }) => {
     const user = users.find((u) => u.id === socket.id);
     if (!user) return;
-    const pointsToAdd = Math.min(Math.max(1, amount), 500);
+    const now = Date.now();
+    const lastRewardAt = ((user as any)._lastPointsRewardAt as number) || 0;
+    if (now - lastRewardAt < 10000) {
+      return;
+    }
+    (user as any)._lastPointsRewardAt = now;
+    const pointsToAdd = Math.min(Math.max(1, Number(amount) || 1), 250);
     user.points = (user.points || 0) + pointsToAdd;
-    if (registeredMembers[user.username]) {
-      registeredMembers[user.username].points = user.points;
+    const regMember = getRegisteredMember(user.username)?.member;
+    if (regMember) {
+      regMember.points = user.points;
       saveMembers();
     }
-    socket.emit('userPointsUpdated', { points: user.points, reason, added: pointsToAdd });
+    socket.emit('userPointsUpdated', { points: user.points, reason: sanitizeText(reason) || 'مكافأة', added: pointsToAdd });
   });
 
   // Broadcast Mini-Game Win to Room
@@ -8581,7 +8841,7 @@ io.on('connection', (socket) => {
       username: 'نظام الجوائز والمسابقات 🏆',
       badge: 'فوز مستحق',
       badgeColor: 'text-amber-500',
-      text: `🎉 كفو! حقق الصقر [${user.username}] فوزاً في (${gameName}) وحصد [${pointsWon} نقطة] إضافية!`,
+      text: `🎉 كفو! حقق الصقر [${user.username}] فوزاً في (${sanitizeText(gameName)}) وحصد [${Math.min(Math.max(1, Number(pointsWon) || 1), 500)} نقطة] إضافية!`,
       time: getCurrentTimeString(),
       timestamp: Date.now()
     };
@@ -8591,57 +8851,77 @@ io.on('connection', (socket) => {
     io.to(user.room).emit('message', winMsg);
   });
 
-  // Delete Private Message (حذف رسالة من الخاص)
+  // Delete Private Message (حذف رسالة من الخاص - مع التحقق من الملكية والمشاركة)
   socket.on('deletePrivateMessage', ({ messageId, partnerId, partnerUsername }: { messageId: string; partnerId?: string; partnerUsername?: string }) => {
-    // Delete from persistent privateChatHistory
-    for (const [pairKey, list] of privateChatHistory.entries()) {
+    const actor = users.find((u) => u.id === socket.id);
+    if (!actor || !messageId) return;
+
+    let deleted = false;
+    let resolvedPartnerUsername = partnerUsername;
+    for (const [, list] of privateChatHistory.entries()) {
       const idx = list.findIndex((m) => m.id === messageId);
       if (idx !== -1) {
+        const msg = list[idx];
+        const isSender = msg.fromUsername?.toLowerCase() === actor.username.toLowerCase();
+        const isParticipant = isSender || msg.toUsername?.toLowerCase() === actor.username.toLowerCase();
+        if (!isSender && !(isParticipant && isSupremeHassan(actor))) {
+          socket.emit('systemAlert', 'لا يمكنك حذف رسالة لم ترسلها أو لست طرفاً فيها.');
+          return;
+        }
+        resolvedPartnerUsername = isSender ? msg.toUsername : msg.fromUsername;
         list.splice(idx, 1);
         savePrivateChatHistory();
+        deleted = true;
         break;
       }
     }
+    if (!deleted) return;
 
     socket.emit('privateMessageDeleted', { messageId });
-    if (partnerId) {
-      io.to(partnerId).emit('privateMessageDeleted', { messageId });
-    }
-    if (partnerUsername) {
-      const partner = users.find((u) => u.username.toLowerCase() === partnerUsername.toLowerCase());
-      if (partner && partner.id !== partnerId) {
+    if (resolvedPartnerUsername) {
+      const partner = users.find((u) => u.username.toLowerCase() === resolvedPartnerUsername!.toLowerCase());
+      if (partner) {
         io.to(partner.id).emit('privateMessageDeleted', { messageId });
       }
+    } else if (partnerId) {
+      io.to(partnerId).emit('privateMessageDeleted', { messageId });
     }
     socket.emit('systemAlert', 'تم حذف الرسالة الخاصة 🗑️');
   });
 
-  // Edit Private Message (تعديل رسالة من الخاص)
+  // Edit Private Message (تعديل رسالة من الخاص - محصور بالمرسل فقط)
   socket.on('editPrivateMessage', ({ messageId, newText, partnerId, partnerUsername }: { messageId: string; newText: string; partnerId?: string; partnerUsername?: string }) => {
-    const user = users.find((u) => u.id === socket.id);
-    if (!user || !newText?.trim()) return;
+    const actor = users.find((u) => u.id === socket.id);
+    if (!actor || !messageId || !newText?.trim()) return;
     const cleanText = sanitizeText(newText.trim());
 
-    // Update in persistent privateChatHistory
-    for (const [pairKey, list] of privateChatHistory.entries()) {
+    let updated = false;
+    let resolvedPartnerUsername = partnerUsername;
+    for (const [, list] of privateChatHistory.entries()) {
       const target = list.find((m) => m.id === messageId);
       if (target) {
+        if (target.fromUsername?.toLowerCase() !== actor.username.toLowerCase()) {
+          socket.emit('systemAlert', 'لا يمكنك تعديل رسالة خاصة لم تقم بإرسالها.');
+          return;
+        }
         target.text = cleanText;
         target.isEdited = true;
+        resolvedPartnerUsername = target.toUsername;
         savePrivateChatHistory();
+        updated = true;
         break;
       }
     }
+    if (!updated) return;
 
     socket.emit('privateMessageEdited', { messageId, newText: cleanText, isEdited: true });
-    if (partnerId) {
-      io.to(partnerId).emit('privateMessageEdited', { messageId, newText: cleanText, isEdited: true });
-    }
-    if (partnerUsername) {
-      const partner = users.find((u) => u.username.toLowerCase() === partnerUsername.toLowerCase());
-      if (partner && partner.id !== partnerId) {
+    if (resolvedPartnerUsername) {
+      const partner = users.find((u) => u.username.toLowerCase() === resolvedPartnerUsername!.toLowerCase());
+      if (partner) {
         io.to(partner.id).emit('privateMessageEdited', { messageId, newText: cleanText, isEdited: true });
       }
+    } else if (partnerId) {
+      io.to(partnerId).emit('privateMessageEdited', { messageId, newText: cleanText, isEdited: true });
     }
     socket.emit('systemAlert', 'تم تعديل الرسالة الخاصة بنجاح ✏️');
   });
@@ -8727,7 +9007,7 @@ io.on('connection', (socket) => {
         const destUsername = recipient ? recipient.username : (toUsername ? toUsername.trim() : '');
         if (!destUsername) return;
 
-        const targetMemberInfo = registeredMembers[destUsername];
+        const targetMemberInfo = getRegisteredMember(destUsername)?.member;
         const isRecipientPmDisabled = recipient ? Boolean(recipient.isPmDisabled) : Boolean(targetMemberInfo?.isPmDisabled);
         if (isRecipientPmDisabled && sender && !isSupremeHassan(sender) && sender.role !== 'admin' && sender.role !== 'super') {
           socket.emit('systemAlert', `عفواً، قام [${destUsername}] بتعطيل استلام المحادثات الخاصة 🔒`);
@@ -8875,7 +9155,7 @@ io.on('connection', (socket) => {
   socket.on('updateIgnoredUsers', ({ ignoredUsers }: { ignoredUsers: string[] }) => {
     const user = users.find((u) => u.id === socket.id);
     if (!user) return;
-    const reg = registeredMembers[user.username];
+    const reg = getRegisteredMember(user.username)?.member;
     if (reg && Array.isArray(ignoredUsers)) {
       reg.ignoredUsers = ignoredUsers.slice(0, 500);
       saveMembers();
@@ -8885,7 +9165,7 @@ io.on('connection', (socket) => {
   socket.on('updateStarredMessages', ({ starredMessages }: { starredMessages: any[] }) => {
     const user = users.find((u) => u.id === socket.id);
     if (!user) return;
-    const reg = registeredMembers[user.username];
+    const reg = getRegisteredMember(user.username)?.member;
     if (reg && Array.isArray(starredMessages)) {
       reg.starredMessages = starredMessages.slice(0, 100);
       saveMembers();
@@ -8895,7 +9175,7 @@ io.on('connection', (socket) => {
   socket.on('updateFriendsList', ({ friends }: { friends: string[] }) => {
     const user = users.find((u) => u.id === socket.id);
     if (!user) return;
-    const reg = registeredMembers[user.username];
+    const reg = getRegisteredMember(user.username)?.member;
     if (reg && Array.isArray(friends)) {
       reg.friends = friends.slice(0, 500);
       saveMembers();
@@ -8936,8 +9216,9 @@ io.on('connection', (socket) => {
     target.likes = (target.likes || 0) + 1;
 
     // Persist in registeredMembers if exists
-    if (registeredMembers[target.username]) {
-      registeredMembers[target.username].likes = target.likes;
+    const regTargetLikes = getRegisteredMember(target.username)?.member;
+    if (regTargetLikes) {
+      regTargetLikes.likes = target.likes;
       saveMembers();
     }
 
@@ -9072,19 +9353,20 @@ io.on('connection', (socket) => {
     socket.emit('systemAlert', `تم إنشاء غرفة [${cleanName}] بنجاح!`);
   });
 
-  // Monitor logs fetch & clear
+  // Monitor logs fetch & clear (Staff/Admin Only)
   socket.on('getMonitorLogs', () => {
     const admin = users.find((u) => u.id === socket.id);
+    if (!admin || (!isSupremeHassan(admin) && admin.role !== 'admin' && admin.role !== 'super' && !hasPermission(admin.role, 'canAccessControlPanel') && getRoleLevel(admin.role) < 50)) {
+      return;
+    }
     socket.emit('monitorLogs', monitorLogs);
     socket.emit('monitoredWordsUpdated', monitoredWords);
-    if (admin && (isSupremeHassan(admin) || admin.role === 'admin' || admin.role === 'super')) {
-      socket.emit('filterAlertsList', filterAlerts);
-    }
+    socket.emit('filterAlertsList', filterAlerts);
   });
 
   socket.on('getFilterAlerts', () => {
     const admin = users.find((u) => u.id === socket.id);
-    if (!admin || (!isSupremeHassan(admin) && admin.role !== 'admin' && admin.role !== 'super')) return;
+    if (!admin || (!isSupremeHassan(admin) && admin.role !== 'admin' && admin.role !== 'super' && !hasPermission(admin.role, 'canAccessControlPanel'))) return;
     socket.emit('filterAlertsList', filterAlerts);
   });
 
@@ -9100,6 +9382,10 @@ io.on('connection', (socket) => {
   });
 
   socket.on('getMonitoredWords', () => {
+    const admin = users.find((u) => u.id === socket.id);
+    if (!admin || (!isSupremeHassan(admin) && admin.role !== 'admin' && admin.role !== 'super' && !hasPermission(admin.role, 'canAccessControlPanel') && getRoleLevel(admin.role) < 50)) {
+      return;
+    }
     socket.emit('monitoredWordsUpdated', monitoredWords);
   });
 
@@ -9181,7 +9467,7 @@ io.on('connection', (socket) => {
     if (!visitor || !targetUsername) return;
     if (visitor.username.toLowerCase() === targetUsername.toLowerCase()) return; // Don't count self visits
 
-    const targetMember = registeredMembers[targetUsername];
+    const targetMember = getRegisteredMember(targetUsername)?.member;
     if (!targetMember) return;
 
     if (!Array.isArray(targetMember.visitors)) {
@@ -9232,7 +9518,7 @@ io.on('connection', (socket) => {
   socket.on('getProfileVisitors', () => {
     const user = users.find((u) => u.id === socket.id);
     if (!user) return;
-    const visitors = registeredMembers[user.username]?.visitors || [];
+    const visitors = getRegisteredMember(user.username)?.member.visitors || [];
     socket.emit('profileVisitorsUpdated', visitors);
   });
 
@@ -9242,6 +9528,10 @@ io.on('connection', (socket) => {
   socket.on('startLiveBroadcast', ({ room, title }: { room: string; title?: string }) => {
     const user = users.find((u) => u.id === socket.id);
     if (!user) return;
+    if (!isSupremeHassan(user) && user.role !== 'admin' && user.role !== 'super' && !hasPermission(user.role, 'canStartLive')) {
+      socket.emit('systemAlert', 'عفواً، صلاحية بدء البث المباشر غير متاحة لرتبتك الحالية.');
+      return;
+    }
 
     const targetRoom = room || user.room || 'الغرفة العامة';
     const broadcast: RoomLiveBroadcast = {
@@ -9250,7 +9540,7 @@ io.on('connection', (socket) => {
       broadcasterAvatar: user.avatarUrl,
       broadcasterFlag: user.flag,
       room: targetRoom,
-      title: title || `بث مباشر 🔴 ${user.username}`,
+      title: sanitizeText(title) || `بث مباشر 🔴 ${user.username}`,
       startedAt: Date.now(),
       viewers: []
     };

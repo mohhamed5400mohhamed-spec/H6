@@ -221,20 +221,33 @@ export async function sendTestNotification(): Promise<boolean> {
   });
 }
 
+let notificationClickCallback: ((data: { type: string; fromUsername?: string; room?: string }) => void) | null = null;
+
 /**
  * Attach global listener for notifications clicked via Service Worker
  */
 export function listenToNotificationClicks(
   callback: (data: { type: string; fromUsername?: string; room?: string }) => void
-): void {
-  if (typeof window === 'undefined' || !('serviceWorker' in navigator) || clickListenerRegistered) {
-    return;
+): () => void {
+  notificationClickCallback = callback;
+  if (typeof window === 'undefined' || !('serviceWorker' in navigator)) {
+    return () => {
+      if (notificationClickCallback === callback) notificationClickCallback = null;
+    };
   }
 
-  clickListenerRegistered = true;
-  navigator.serviceWorker.addEventListener('message', (event) => {
-    if (event.data?.type === 'NOTIFICATION_CLICKED' && event.data.data) {
-      callback(event.data.data);
+  if (!clickListenerRegistered) {
+    clickListenerRegistered = true;
+    navigator.serviceWorker.addEventListener('message', (event) => {
+      if (event.data?.type === 'NOTIFICATION_CLICKED' && event.data.data && notificationClickCallback) {
+        notificationClickCallback(event.data.data);
+      }
+    });
+  }
+
+  return () => {
+    if (notificationClickCallback === callback) {
+      notificationClickCallback = null;
     }
-  });
+  };
 }
